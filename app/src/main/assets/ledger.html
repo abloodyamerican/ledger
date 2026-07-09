@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0C0F14">
+<title>Ledger</title>
+<style>
+  :root{
+    --bg:#0C0F14;--panel:#141922;--panel2:#1A2130;--line:#232B3A;
+    --text:#E8EDF4;--dim:#8B95A7;--green:#5EEAA0;--amber:#F5C452;
+    --red:#F4746B;--blue:#6FA8FF;--purple:#B79BFF;
+    --mono:'SF Mono','Cascadia Code','JetBrains Mono',ui-monospace,Menlo,monospace;
+    --sans:'Avenir Next','Segoe UI',system-ui,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);padding-bottom:calc(100px + env(safe-area-inset-bottom,0px));-webkit-tap-highlight-color:transparent}
+  .hdr{padding:calc(20px + env(safe-area-inset-top,0px)) 16px 12px;border-bottom:1px solid var(--line)}
+  .eyebrow{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--dim)}
+  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px}
+  .stat-l{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim)}
+  .stat-v{font-family:var(--mono);font-size:19px;font-weight:600;margin-top:2px}
+  .tabs{display:flex;gap:6px;padding:12px 16px;overflow-x:auto}
+  .tab{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:20px;padding:7px 16px;font-size:13px;font-weight:600;white-space:nowrap;font-family:var(--sans)}
+  .tab.on{background:var(--panel2);border-color:var(--blue);color:var(--text)}
+  .wrap{padding:0 16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  .row-item{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
+  .bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}
+  .bar>div{height:100%;border-radius:3px;transition:width .4s ease}
+  .chk{width:26px;height:26px;border-radius:8px;border:1.5px solid var(--dim);background:transparent;color:var(--green);font-size:14px;flex-shrink:0}
+  .chk.on{border-color:var(--green);background:rgba(94,234,160,.15)}
+  .name{font-weight:600;font-size:14px}
+  .sub{font-size:11px;color:var(--dim);margin-top:2px}
+  .amt{font-family:var(--mono);font-weight:600;font-size:15px}
+  .chip{font-size:10px;color:var(--blue);margin-left:6px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;white-space:nowrap}
+  .chip.p{color:var(--purple)}
+  .lnk{color:var(--purple);font-size:11px;margin-left:6px}
+  .krow{display:flex;justify-content:space-between;align-items:baseline;padding:7px 0}
+  .krow.top{border-top:1px solid var(--line)}
+  .krow .kl{font-size:12px;color:var(--dim)}
+  .krow .kv{font-family:var(--mono);font-size:13px;font-weight:600}
+  .krow.big .kl{font-size:14px;color:var(--text);font-weight:700}
+  .krow.big .kv{font-size:18px;font-weight:700}
+  .hint{font-size:11px;color:var(--dim)}
+  .btn{background:rgba(111,168,255,.15);border:1px solid var(--blue);color:var(--blue);border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;font-family:var(--sans)}
+  .btn.ghost{background:transparent;border-color:var(--line);color:var(--dim)}
+  .btn.danger{background:rgba(244,116,107,.15);border-color:var(--red);color:var(--red)}
+  .btn.green{background:rgba(94,234,160,.15);border-color:var(--green);color:var(--green)}
+  button{cursor:pointer}
+  input,select,textarea{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%}
+  .fld{display:flex;flex-direction:column;gap:4px;flex:1;min-width:110px}
+  .fld span{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim)}
+  .fab{position:fixed;bottom:24px;right:20px;width:54px;height:54px;border-radius:27px;background:var(--blue);color:#0C0F14;font-size:28px;border:none;box-shadow:0 4px 20px rgba(111,168,255,.4);font-weight:700;z-index:5}
+  .fab2{position:fixed;bottom:24px;right:84px;height:54px;border-radius:27px;padding:0 18px;background:var(--panel2);color:var(--text);font-size:13px;font-weight:700;border:1px solid var(--line);z-index:5}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;z-index:10}
+  .sheet{background:var(--panel);border-top:1px solid var(--line);border-radius:16px 16px 0 0;padding:20px 16px calc(40px + env(safe-area-inset-bottom,0px));width:100%;max-height:80vh;overflow-y:auto}
+  .sheet h3{font-size:16px;margin-bottom:16px}
+  .frm{display:flex;flex-wrap:wrap;gap:12px}
+  .banner{margin:10px 16px 0;padding:8px 12px;background:rgba(111,168,255,.1);border:1px solid var(--blue);border-radius:8px;font-size:12px;color:var(--blue);cursor:pointer}
+  .alertbox{margin:10px 16px 0;padding:8px 12px;background:rgba(245,196,82,.1);border:1px solid var(--amber);border-radius:8px;font-size:12px;color:var(--amber)}
+  .adj{margin-top:16px;padding:12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px}
+  .adj .lbl{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:8px}
+  .adjbtn{width:44px;height:44px;border-radius:10px;font-size:22px;font-weight:700}
+  .adjbtn.m{border:1.5px solid var(--red);background:rgba(244,116,107,.12);color:var(--red)}
+  .adjbtn.p{border:1.5px solid var(--green);background:rgba(94,234,160,.12);color:var(--green)}
+  .sec{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin:10px 0 8px}
+  .logrow{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
+  .g{color:var(--green)}.r{color:var(--red)}.a{color:var(--amber)}.p{color:var(--purple)}.b{color:var(--blue)}.d{color:var(--dim)}
+  .mono{font-family:var(--mono)}
+  .empty{text-align:center;padding:30px 16px;color:var(--dim);font-size:13px}
+  body.light{
+    --bg:#EFF2F7;--panel:#FFFFFF;--panel2:#E9EDF4;--line:#D4DAE4;
+    --text:#1A2130;--dim:#5C6675;--green:#118A56;--amber:#A56A00;
+    --red:#C64040;--blue:#2563EB;--purple:#6D4FC4;
+  }
+  .pfp{width:38px;height:38px;border-radius:19px;background:var(--panel2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0;flex-shrink:0}
+  .pfp img{width:100%;height:100%;object-fit:cover}
+  .menu{background:var(--panel);border:1px solid var(--line);border-radius:14px;width:min(320px,88vw);padding:8px;margin:auto}
+  .menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font-family:var(--sans);font-size:15px;font-weight:600;padding:13px 12px;border-bottom:1px solid var(--line)}
+  .menu button:last-child{border-bottom:none}
+  .overlay.center{align-items:center;justify-content:center}
+  .stubtbl{width:100%;font-size:12px}
+  .stubtbl .trow{display:flex;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)}
+  .stubtbl .thead{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="sheetHost"></div>
+<script>
+"use strict";
+const KEY = "ledger-v1";
+const FREQ = { weekly:{per:52,label:"Weekly"}, biweekly:{per:26,label:"Every 2 weeks"}, semimonthly:{per:24,label:"Twice a month"}, monthly:{per:12,label:"Monthly"} };
+const SEED = {
+  monthKey: "",
+  settings: { notif:false, lowBal:50, ccPct:30, dueDays:3, theme:"dark" },
+  profile: { photo:"", name:"", nick:"", email:"", phone:"" },
+  payAnchor: "",
+  jobs: [],
+  misc: [],
+  monthly: [],
+  annual: [],
+  invest: [],
+  cash: [],
+  credit: [],
+  log: [],
+  notified: {},
+};
+
+// ---------- helpers ----------
+const fmt = n => "$" + Number(n||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtShort = n => { n=Number(n||0); if(n>=1e6) return "$"+(n/1e6).toFixed(1)+"M"; if(n>=1e4) return "$"+Math.round(n/1e3)+"k"; return fmt(n); };
+const esc = s => String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const monthKeyNow = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); };
+const dayKey = () => new Date().toISOString().slice(0,10);
+const todayDay = new Date().getDate();
+const ord = n => n + (["st","nd","rd"][((n+90)%100-10)%10-1]||"th");
+const fmtDate = s => s ? new Date(s+"T12:00").toLocaleDateString("en-US",{month:"numeric",day:"numeric",year:"2-digit"}) : "";
+function nextPayday(a){ if(!a) return null; const d=new Date(a+"T12:00"); const now=new Date(); now.setHours(0,0,0,0); while(d<now) d.setDate(d.getDate()+14); return d; }
+const VALUE_FIELD = { monthly:"debt", credit:"debt", cash:"amt", invest:"amt" };
+
+// ---------- state ----------
+let S, tab="budget", editing=null, F=null, banner="", backupStatus="", activeAlerts=[];
+
+function migrate(d){
+  const base=JSON.parse(JSON.stringify(SEED));
+  d={...base,...d};
+  d.settings={...base.settings,...(d.settings||{})};
+  d.profile={...base.profile,...(d.profile||{})};
+  d.jobs=(d.jobs||[]).map(j=>({rates:[],stubs:[],pct:0,freq:"biweekly",archived:false,...j}));
+  const mk=monthKeyNow();
+  if(d.monthKey && d.monthKey!==mk){
+    d.monthly=d.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
+    d.misc=d.misc.map(m=>({...m,spent:0}));
+    banner="New month — bills unchecked, misc spending reset";
+  }
+  d.monthKey=mk;
+  return d;
+}
+function load(){
+  let d;
+  try{ const r=localStorage.getItem(KEY); d = r ? JSON.parse(r) : JSON.parse(JSON.stringify(SEED)); }
+  catch(e){ d=JSON.parse(JSON.stringify(SEED)); }
+  return migrate(d);
+}
+function persist(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){} }
+function addLog(e){ S.log=[{id:Date.now()+Math.random(),ts:Date.now(),...e},...(S.log||[])].slice(0,200); }
+function propagateLink(link,value){
+  if(!link) return;
+  ["monthly","credit","cash","invest"].forEach(k=>{ S[k]=S[k].map(x=>x.link===link?{...x,[VALUE_FIELD[k]]:value}:x); });
+}
+
+// ---------- calc ----------
+function calc(){
+  const eff=b=>(b.schedAmt>0?b.schedAmt:b.amt);
+  const mTotal=S.monthly.reduce((s,b)=>s+eff(b),0);
+  const mLeft=S.monthly.filter(b=>!b.paid).reduce((s,b)=>s+eff(b),0);
+  const mDebt=S.monthly.reduce((s,b)=>s+(b.debt||0),0);
+  const aTotal=S.annual.reduce((s,b)=>s+b.amt,0);
+  const aLeft=S.annual.filter(b=>!b.paid).reduce((s,b)=>s+b.amt,0);
+  const iTotal=S.invest.reduce((s,b)=>s+b.amt,0);
+  const cashTotal=S.cash.reduce((s,b)=>s+b.amt,0);
+  const savingsTotal=S.cash.filter(b=>b.savings).reduce((s,b)=>s+b.amt,0);
+  const minKeepTotal=S.cash.filter(b=>!b.savings).reduce((s,b)=>s+(b.minKeep||0),0);
+  const spendCash=cashTotal-savingsTotal;
+  const ccDebt=S.credit.reduce((s,b)=>s+b.debt,0);
+  const ccLimit=S.credit.reduce((s,b)=>s+b.limit,0);
+  const miscBudget=S.misc.reduce((s,m)=>s+m.budget,0);
+  const miscSpent=S.misc.reduce((s,m)=>s+m.spent,0);
+  const miscLeft=Math.max(0,miscBudget-miscSpent);
+  const payday=nextPayday(S.payAnchor);
+  const now=new Date(); now.setHours(0,0,0,0);
+  const daysToPay=payday?Math.round((payday-now)/86400000):null;
+  const dueBefore=payday?S.monthly.filter(b=>!b.paid&&b.due>0).filter(b=>{
+    const dd=new Date(now.getFullYear(),now.getMonth(),b.due); return dd<=payday;
+  }):[];
+  const dueBeforeTotal=dueBefore.reduce((s,b)=>s+eff(b),0);
+  // per-job estimates
+  const jobCalcs=S.jobs.filter(j=>!j.archived).map(j=>{
+    const gross=(j.rates||[]).reduce((s,r)=>s+(r.rate||0)*(r.hours||0),0);
+    const hours=(j.rates||[]).reduce((s,r)=>s+(r.hours||0),0);
+    const net=gross*(1-(j.pct||0)/100);
+    const stubs=j.stubs||[];
+    const avgNet=stubs.length?stubs.reduce((s,st)=>s+st.net,0)/stubs.length:net;
+    const per=FREQ[j.freq]?.per||26;
+    return {job:j,gross,hours,net,avgNet,per,year:avgNet*per,month:avgNet*per/12,week:avgNet*per/52};
+  });
+  const estWeek=jobCalcs.reduce((s,j)=>s+j.week,0);
+  const estMonth=jobCalcs.reduce((s,j)=>s+j.month,0);
+  const estYear=jobCalcs.reduce((s,j)=>s+j.year,0);
+  const loanDebt=S.monthly.filter(b=>(b.debt||0)>0&&!b.link).reduce((s,b)=>s+b.debt,0);
+  const totalDebt=ccDebt+loanDebt;
+  const netWorth=cashTotal+iTotal-totalDebt;
+  const totalToSpend=spendCash-minKeepTotal;
+  const afterBills=totalToSpend-dueBeforeTotal-miscLeft;
+  return {eff,mTotal,mLeft,mDebt,aTotal,aLeft,iTotal,cashTotal,savingsTotal,minKeepTotal,spendCash,ccDebt,ccLimit,miscBudget,miscSpent,miscLeft,payday,daysToPay,dueBefore,dueBeforeTotal,jobCalcs,estWeek,estMonth,estYear,totalDebt,netWorth,totalToSpend,afterBills};
+}
+
+// ---------- notifications ----------
+function collectAlerts(){
+  const out=[];
+  const st=S.settings;
+  S.cash.filter(a=>!a.savings&&a.amt<st.lowBal).forEach(a=>out.push({key:"low-"+a.id,title:"Account low",body:`${a.name} is at ${fmt(a.amt)} (below ${fmt(st.lowBal)})`}));
+  S.credit.filter(c=>c.limit>0&&(c.debt/c.limit)*100>=st.ccPct).forEach(c=>out.push({key:"cc-"+c.id,title:"Card usage high",body:`${c.name} is at ${((c.debt/c.limit)*100).toFixed(0)}% of its limit (${fmt(c.debt)} / ${fmtShort(c.limit)})`}));
+  const now=new Date(); now.setHours(0,0,0,0);
+  S.monthly.filter(b=>!b.paid&&b.due>0).forEach(b=>{
+    const dd=new Date(now.getFullYear(),now.getMonth(),b.due);
+    const diff=Math.round((dd-now)/86400000);
+    if(diff>=0&&diff<=st.dueDays) out.push({key:"bill-"+b.id,title:"Bill due "+(diff===0?"today":"in "+diff+" day"+(diff>1?"s":"")),body:`${b.name} — ${fmt(b.schedAmt>0?b.schedAmt:b.amt)} due the ${ord(b.due)}`});
+    else if(diff<0) out.push({key:"late-"+b.id,title:"Bill overdue",body:`${b.name} was due the ${ord(b.due)} — ${fmt(b.schedAmt>0?b.schedAmt:b.amt)}`});
+  });
+  S.annual.filter(b=>!b.paid&&b.date).forEach(b=>{
+    const dd=new Date(b.date+"T12:00"); dd.setHours(0,0,0,0);
+    const diff=Math.round((dd-now)/86400000);
+    if(diff>=0&&diff<=st.dueDays) out.push({key:"ann-"+b.id,title:"Annual bill due "+(diff===0?"today":"in "+diff+" days"),body:`${b.name} — ${fmt(b.amt)}`});
+  });
+  return out;
+}
+function buildSchedule(){
+  // upcoming bill-due alerts for the next 35 days, for the native daily alarm
+  const out=[]; const st=S.settings;
+  const now=new Date(); now.setHours(0,0,0,0);
+  const push=(dt,t,b)=>{ out.push({d:dt.toISOString().slice(0,10),t,b}); };
+  for(let off=0;off<=35;off++){
+    const day=new Date(now); day.setDate(day.getDate()+off);
+    S.monthly.filter(x=>x.due>0&&!(off===0&&x.paid)).forEach(x=>{
+      const dd=new Date(day.getFullYear(),day.getMonth(),x.due);
+      const diff=Math.round((dd-day)/86400000);
+      if(diff>=0&&diff<=st.dueDays&&dd.getMonth()===day.getMonth())
+        push(day,"Bill due "+(diff===0?"today":"in "+diff+" day"+(diff>1?"s":"")),x.name+" — "+fmt(x.schedAmt>0?x.schedAmt:x.amt));
+    });
+    S.annual.filter(x=>!x.paid&&x.date).forEach(x=>{
+      const dd=new Date(x.date+"T12:00"); dd.setHours(0,0,0,0);
+      const diff=Math.round((dd-day)/86400000);
+      if(diff>=0&&diff<=st.dueDays)
+        push(day,"Annual bill due "+(diff===0?"today":"in "+diff+" days"),x.name+" — "+fmt(x.amt));
+    });
+  }
+  return out.slice(0,150);
+}
+function checkAlerts(){
+  activeAlerts=collectAlerts();
+  const native = typeof window!=="undefined" && window.Android;
+  if(native){
+    try{ window.Android.setSchedule(JSON.stringify(S.settings.notif?buildSchedule():[])); }catch(e){}
+    if(S.settings.notif){
+      const today=dayKey();
+      activeAlerts.forEach(a=>{
+        if(S.notified[a.key]!==today){
+          try{ window.Android.notify(a.title,a.body); }catch(e){}
+          S.notified[a.key]=today;
+        }
+      });
+      persist();
+    }
+    return;
+  }
+  if(S.settings.notif && typeof Notification!=="undefined" && Notification.permission==="granted"){
+    const today=dayKey();
+    activeAlerts.forEach(a=>{
+      if(S.notified[a.key]!==today){
+        try{ new Notification(a.title,{body:a.body,tag:a.key}); }catch(e){}
+        S.notified[a.key]=today;
+      }
+    });
+    persist();
+  }
+}
+function toggleNotif(on){
+  if(typeof window!=="undefined" && window.Android){
+    S.settings.notif=!!on;
+    banner = on ? "Notifications on — bills are checked daily at 9 AM even when the app is closed. If nothing shows, allow notifications for Ledger in Android settings." : "Notifications off";
+    persist(); checkAlerts(); render(); return;
+  }
+  if(on){
+    if(typeof Notification==="undefined"){ banner="Notifications aren't supported in this browser/WebView"; render(); return; }
+    Notification.requestPermission().then(p=>{
+      S.settings.notif = p==="granted";
+      banner = p==="granted" ? "Notifications on — alerts fire when the app checks (on open + every 30 min while open)" : "Permission denied — enable notifications for this app in Android settings";
+      persist(); checkAlerts(); render();
+    });
+  } else { S.settings.notif=false; persist(); render(); }
+}
+function settingChange(k,v){ S.settings[k]=parseFloat(v)||0; persist(); checkAlerts(); softHdr(); }
+
+// ---------- actions ----------
+function setTab(t){ tab=t; render(); }
+function dismissBanner(){ banner=""; render(); }
+function togglePaid(key,id){
+  const item=S[key].find(x=>x.id===id);
+  S[key]=S[key].map(x=>x.id===id?{...x,paid:!x.paid}:x);
+  addLog({name:item.name,action:item.paid?"unpaid":"paid",delta:item.paid?0:-(item.schedAmt>0?item.schedAmt:item.amt)});
+  persist(); checkAlerts(); render();
+}
+function resetMonthBills(){ if(confirm("Uncheck all monthly bills?")){ S.monthly=S.monthly.map(b=>({...b,paid:false})); persist(); render(); } }
+function resetApp(){
+  if(!confirm("Wipe EVERYTHING and start fresh?")) return;
+  if(!confirm("Last chance — this cannot be undone.")) return;
+  localStorage.removeItem(KEY);
+  S=migrate(JSON.parse(JSON.stringify(SEED))); banner="Fresh start"; tab="budget"; persist(); render();
+}
+function anchorChange(v){ S.payAnchor=v; persist(); render(); }
+function clearLog(){ if(confirm("Clear all history?")){ S.log=[]; persist(); render(); } }
+function softHdr(){ const h=document.getElementById("hdrStats"); if(h) h.innerHTML=hdrStatsHTML(calc()); }
+
+// ---------- jobs ----------
+function addJob(){
+  S.jobs.push({id:Date.now(),name:"Job "+(S.jobs.length+1),freq:"biweekly",pct:0,rates:[{id:Date.now()+1,name:"Base",rate:0,hours:0}],stubs:[]});
+  persist(); render();
+}
+function delJob(id){
+  const j=S.jobs.find(x=>x.id===id);
+  if(confirm(`Delete "${j.name}" and its ${j.stubs.length} saved stub(s)?`)){ S.jobs=S.jobs.filter(x=>x.id!==id); persist(); render(); }
+}
+function jobField(id,k,v){ S.jobs=S.jobs.map(j=>j.id===id?{...j,[k]:k==="pct"?(parseFloat(v)||0):v}:j); persist(); if(k==="pct") softHdr(); }
+function jobRateField(jid,rid,k,v){
+  S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:j.rates.map(r=>r.id===rid?{...r,[k]:k==="name"?v:(parseFloat(v)||0)}:r)});
+  persist();
+  const c=calc(); const jc=c.jobCalcs.find(x=>x.job.id===jid);
+  const g=document.getElementById("jg_"+jid); if(g) g.textContent=fmt(jc.gross);
+  const n=document.getElementById("jn_"+jid); if(n) n.textContent=fmt(jc.net);
+  softHdr();
+}
+function addJobRate(jid){ S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:[...j.rates,{id:Date.now(),name:"New rate",rate:0,hours:0}]}); persist(); render(); }
+function delJobRate(jid,rid){ S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:j.rates.filter(r=>r.id!==rid)}); persist(); render(); }
+function resetJobHours(jid){ if(confirm("Reset hours to 0 for the new pay period?")){ S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:j.rates.map(r=>({...r,hours:0}))}); persist(); render(); } }
+function resetJobPct(jid){
+  if(confirm("Clear the saved deduction rate? Enter a new stub to learn it again.")){ jobField(jid,"pct",0); render(); }
+}
+
+// ---------- itemized paystub entry ----------
+const r2=n=>Math.round((Number(n)||0)*100)/100;
+
+function openStub(jid){
+  const j=S.jobs.find(x=>x.id===jid);
+  editing={tab:"stub",item:null,jobId:jid};
+  F={
+    start:"",end:"",payDate:"",
+    earnings:(j.earningTypes&&j.earningTypes.length)?j.earningTypes.map(t=>({name:t.name,jobTitle:t.jobTitle||"",hours:0,rate:t.rate||0,cur:0,ytd:0})):[{name:"Regular",jobTitle:"",hours:0,rate:0,cur:0,ytd:0}],
+    deductions:(j.dedTypes||[]).map(t=>({name:t.name,pretax:t.pretax||"",eeCur:0,eeYtd:0,erCur:0,erYtd:0,_pEE:t.pctEE||0,_pER:t.pctER||0})),
+    taxes:(j.taxTypes||[]).map(t=>({name:t.name,cur:0,ytd:0,_p:t.pct||0})),
+    pto:(j.ptoPlans||[]).map(p=>({plan:p,taken:0,cur:0,bal:0})),
+    ovr:{}, // manual summary overrides
+  };
+  renderSheet();
+}
+
+// row templates for + buttons
+const ST_BLANK={
+  earnings:{name:"",jobTitle:"",hours:0,rate:0,cur:0,ytd:0},
+  deductions:{name:"",pretax:"",eeCur:0,eeYtd:0,erCur:0,erYtd:0,_pEE:0,_pER:0},
+  taxes:{name:"",cur:0,ytd:0,_p:0},
+  pto:{plan:"",taken:0,cur:0,bal:0},
+};
+function stAdd(sec){ F[sec].push({...ST_BLANK[sec]}); renderSheet(); }
+function stDel(sec,i){ F[sec].splice(i,1); renderSheet(); }
+
+function stGross(){ return F.earnings.reduce((s,e)=>s+(e.cur||0),0); }
+function stAutofill(){
+  const g=stGross();
+  F.deductions.forEach(d=>{
+    if(!d._eeMan) d.eeCur=r2(g*(d._pEE||0));
+    if(!d._erMan) d.erCur=r2(g*(d._pER||0));
+  });
+  F.taxes.forEach(t=>{ if(!t._man) t.cur=r2(g*(t._p||0)); });
+}
+function stSet(sec,i,k,v){
+  const row=F[sec][i];
+  if(k==="name"||k==="jobTitle"||k==="pretax"||k==="plan") row[k]=v;
+  else row[k]=parseFloat(v)||0;
+  if(sec==="earnings"){
+    if(k==="hours"||k==="rate"){ if(!row._curMan) row.cur=r2((row.hours||0)*(row.rate||0)); }
+    if(k==="cur") row._curMan=true;
+    stAutofill();
+    // refresh autofilled inputs + totals without a full re-render
+    F.deductions.forEach((d,di)=>{ const a=document.getElementById(`sd_ee_${di}`); if(a&&!d._eeMan) a.value=d.eeCur; const b=document.getElementById(`sd_er_${di}`); if(b&&!d._erMan) b.value=d.erCur; });
+    F.taxes.forEach((t,ti)=>{ const a=document.getElementById(`st_cur_${ti}`); if(a&&!t._man) a.value=t.cur; });
+    if(k==="hours"||k==="rate"){ const c=document.getElementById(`se_cur_${i}`); if(c&&!row._curMan) c.value=row.cur; }
+  }
+  if(sec==="deductions"&&k==="eeCur") row._eeMan=true;
+  if(sec==="deductions"&&k==="erCur") row._erMan=true;
+  if(sec==="taxes"&&k==="cur") row._man=true;
+  stTotals();
+}
+function stSum(){
+  const g=stGross();
+  const hrs=F.earnings.reduce((s,e)=>s+(e.hours||0),0);
+  const pretaxEE=F.deductions.filter(d=>d.pretax==="yes").reduce((s,d)=>s+(d.eeCur||0),0);
+  const pretaxEEy=F.deductions.filter(d=>d.pretax==="yes").reduce((s,d)=>s+(d.eeYtd||0),0);
+  const eeDed=F.deductions.reduce((s,d)=>s+(d.eeCur||0),0);
+  const eeDedY=F.deductions.reduce((s,d)=>s+(d.eeYtd||0),0);
+  const erDed=F.deductions.reduce((s,d)=>s+(d.erCur||0),0);
+  const erDedY=F.deductions.reduce((s,d)=>s+(d.erYtd||0),0);
+  const tax=F.taxes.reduce((s,t)=>s+(t.cur||0),0);
+  const taxY=F.taxes.reduce((s,t)=>s+(t.ytd||0),0);
+  const gY=F.earnings.reduce((s,e)=>s+(e.ytd||0),0);
+  const o=F.ovr;
+  const cur={gtw:o.c_gtw??r2(g-pretaxEE),tax:o.c_tax??r2(tax),ded:o.c_ded??r2(eeDed),net:o.c_net??r2(g-tax-eeDed)};
+  const ytd={gtw:o.y_gtw??r2(gY-pretaxEEy),tax:o.y_tax??r2(taxY),ded:o.y_ded??r2(eeDedY),net:o.y_net??r2(gY-taxY-eeDedY)};
+  return {g,gY,hrs,eeDed,eeDedY,erDed,erDedY,tax,taxY,cur,ytd};
+}
+function stOvr(k,v){ if(v===""||v==null) delete F.ovr[k]; else F.ovr[k]=parseFloat(v)||0; stTotals(); }
+function stTotals(){
+  const el=document.getElementById("stubTotals");
+  if(el) el.innerHTML=stubTotalsHTML();
+}
+function stubTotalsHTML(){
+  const s=stSum();
+  const sumIn=(k,val)=>`<input type="number" step="0.01" inputmode="decimal" value="${val}" style="width:90px;text-align:right;padding:4px 6px;font-size:12px" oninput="stOvr('${k}',this.value)">`;
+  return `
+    ${krow("Total hours",s.hrs.toFixed(2))}
+    ${krow("Gross pay",fmt(s.g),"g",true,true)}
+    ${krow("Employee deductions ("+(s.g?((s.eeDed/s.g)*100).toFixed(1):"0")+"% of gross)","−"+fmt(s.eeDed),"r")}
+    ${krow("Employer deductions",fmt(s.erDed),"b")}
+    ${krow("Taxes ("+(s.g?((s.tax/s.g)*100).toFixed(1):"0")+"% of gross)","−"+fmt(s.tax),"r")}
+    <div class="sec" style="margin-top:12px">Plan summary <span style="text-transform:none;letter-spacing:0">(auto — edit any box to override)</span></div>
+    <div style="display:grid;grid-template-columns:60px 1fr 1fr 1fr 1fr;gap:6px;align-items:center;font-size:11px">
+      <span></span><span class="d">Gross taxable</span><span class="d">Taxes</span><span class="d">Deductions</span><span class="d">Net pay</span>
+      <span class="d">Current</span>${sumIn("c_gtw",s.cur.gtw)}${sumIn("c_tax",s.cur.tax)}${sumIn("c_ded",s.cur.ded)}${sumIn("c_net",s.cur.net)}
+      <span class="d">YTD</span>${sumIn("y_gtw",s.ytd.gtw)}${sumIn("y_tax",s.ytd.tax)}${sumIn("y_ded",s.ytd.ded)}${sumIn("y_net",s.ytd.net)}
+    </div>`;
+}
+
+function saveStub(){
+  const j=S.jobs.find(x=>x.id===editing.jobId);
+  const s=stSum();
+  if(!(s.g>0)){ alert("Enter at least one earning with a current amount."); return; }
+  const clean=o=>{const c={...o};Object.keys(c).forEach(k=>{if(k.startsWith("_"))delete c[k];});return c;};
+  const stub={
+    id:Date.now(),start:F.start,end:F.end,payDate:F.payDate,
+    earnings:F.earnings.filter(e=>e.name).map(clean),
+    deductions:F.deductions.filter(d=>d.name).map(clean),
+    taxes:F.taxes.filter(t=>t.name).map(clean),
+    pto:F.pto.filter(p=>p.plan).map(clean),
+    summary:{cur:s.cur,ytd:s.ytd},hours:s.hrs,
+    gross:s.g,net:s.cur.net, // used by estimates
+    pct:s.g?r2(((s.g-s.cur.net)/s.g)*100):0,
+  };
+  j.stubs=[stub,...(j.stubs||[])];
+  // learn saved options + percentages for future autofill (saved list = exactly this stub's rows)
+  j.earningTypes=stub.earnings.map(e=>({name:e.name,jobTitle:e.jobTitle,rate:e.rate}));
+  j.dedTypes=stub.deductions.map(d=>({name:d.name,pretax:d.pretax,pctEE:s.g?d.eeCur/s.g:0,pctER:s.g?d.erCur/s.g:0}));
+  j.taxTypes=stub.taxes.map(t=>({name:t.name,pct:s.g?t.cur/s.g:0}));
+  j.ptoPlans=stub.pto.map(p=>p.plan);
+  j.pct=stub.pct; // net-estimate rate for the job card
+  addLog({name:j.name+" paystub",action:"added",delta:stub.net});
+  persist(); closeSheet(); render();
+}
+function delStub(jid,sid){
+  if(!confirm("Delete this stub from history?")) return;
+  S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,stubs:j.stubs.filter(s=>s.id!==sid)});
+  persist(); openHistory(jid);
+}
+function openHistory(jid){
+  const j=S.jobs.find(x=>x.id===jid);
+  const rows=(j.stubs||[]).map(s=>{
+    const hrs=s.hours!=null?` · ${Number(s.hours).toFixed(2)} hrs`:"";
+    const items=s.earnings?`<div class="sub">${s.earnings.map(e=>esc(e.name)+" "+fmt(e.cur)).join(" · ")}</div>`:"";
+    return `
+    <div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <span class="mono g" style="font-weight:700">${fmt(s.net)} net</span>
+        <button class="btn ghost" style="padding:3px 8px;font-size:11px" onclick="delStub(${jid},${s.id})">✕</button>
+      </div>
+      <div class="sub">Gross ${fmt(s.gross)} · deductions+taxes ${s.pct}%${hrs}</div>
+      ${items}
+      <div class="sub">${s.start||s.end?`Period ${fmtDate(s.start)} – ${fmtDate(s.end)}`:""}${s.payDate?` · paid ${fmtDate(s.payDate)}`:""}</div>
+    </div>`;}).join("");
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet">
+        <h3>${esc(j.name)} — stub history (${j.stubs.length})</h3>
+        ${j.stubs.length?rows:'<div class="hint">No stubs saved yet. Use "Enter stub" after a payday.</div>'}
+        <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn ghost" onclick="closeSheet()">Close</button></div>
+      </div>
+    </div>`;
+}
+function openEstimates(){
+  const c=calc();
+  const perJob=c.jobCalcs.map(j=>`
+    ${krow(esc(j.job.name)+` (${FREQ[j.job.freq]?.label||j.job.freq}, ${j.job.stubs.length?"avg of "+j.job.stubs.length+" stub"+(j.job.stubs.length>1?"s":""):"current entry"})`,fmt(j.avgNet)+"/check")}`).join("");
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet">
+        <h3>Income estimates (net)</h3>
+        ${S.jobs.length?perJob:'<div class="hint">Add a job and enter a stub first.</div>'}
+        <div style="margin-top:8px">
+          ${krow("Upcoming week",fmt(c.estWeek),"g",false,true)}
+          ${krow("This month",fmt(c.estMonth),"g",true)}
+          ${krow("Year total",fmt(c.estYear),"g",true)}
+          ${krow("Month vs monthly bills ("+fmt(c.mTotal)+")",fmt(c.estMonth-c.mTotal),c.estMonth-c.mTotal>=0?"g":"r",false,true)}
+        </div>
+        <div class="hint" style="margin-top:8px">Based on average net per check × pay frequency. More stubs = better estimates.</div>
+        <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn ghost" onclick="closeSheet()">Close</button></div>
+      </div>
+    </div>`;
+}
+
+// backup / restore
+function doBackup(){ const ta=document.getElementById("bk"); ta.value=JSON.stringify(S); backupStatus="✓ Backup generated below"; render(true); }
+function doCopy(){
+  const ta=document.getElementById("bk");
+  if(!ta.value) ta.value=JSON.stringify(S);
+  const txt=ta.value;
+  const done=o=>{ backupStatus=o?"✓ Copied to clipboard":"Couldn't auto-copy — long-press the box to copy manually"; render(true); };
+  if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(()=>done(true)).catch(()=>{ ta.select(); done(document.execCommand("copy")); }); }
+  else { ta.select(); done(document.execCommand("copy")); }
+}
+function doRestore(){
+  const ta=document.getElementById("bk");
+  try{
+    const p=JSON.parse(ta.value.trim());
+    if(!p.monthly||!p.cash) throw 0;
+    S=migrate(p); persist(); backupStatus="✓ Data restored"; ta.value=""; render();
+  }catch(e){ backupStatus="✗ Invalid backup — paste the exact text from a previous Backup"; render(true); }
+}
+
+// ---------- edit sheet ----------
+const BLANK={
+  monthly:{name:"",due:1,amt:0,paid:false,debt:0,apr:0,note:"",link:"",acct:"",schedAmt:0,schedDate:""},
+  annual:{name:"",date:new Date().getFullYear()+"-01-01",amt:0,paid:false},
+  invest:{name:"",apy:0,amt:0,goal:1000,link:""},
+  cash:{name:"",tag:"",amt:0,link:"",savings:false,minKeep:0,last4:"",l4type:"account",url:""},
+  credit:{name:"",limit:0,debt:0,apr:0,note:"",link:"",last4:"",url:""},
+  misc:{name:"",budget:0,spent:0},
+};
+const TITLES={monthly:"Monthly bill",annual:"Annual bill",invest:"Investment",cash:"Cash account",credit:"Credit card",misc:"Misc category",stub:"Paystub"};
+const ADJ={misc:["spent","spent"],cash:["amt","balance"],invest:["amt","balance"],credit:["debt","debt"],monthly:["debt","debt"]};
+
+function openEdit(t,id){
+  const item=id!=null?S[t].find(x=>x.id===id):null;
+  editing={tab:t,item};
+  F=item?JSON.parse(JSON.stringify(item)):JSON.parse(JSON.stringify(BLANK[t]));
+  renderSheet();
+}
+function closeSheet(){ editing=null; F=null; document.getElementById("sheetHost").innerHTML=""; }
+function fSet(k,v){ F[k]=v; }
+function fSetNum(k,v){ F[k]=parseFloat(v)||0; }
+function fSetBool(k,v){ F[k]=!!v; }
+function applyAdj(sign){
+  const [field]=ADJ[editing.tab]||[];
+  const inp=document.getElementById("adjIn");
+  const v=parseFloat(inp.value);
+  if(!v) return;
+  F[field]=Math.round((Number(F[field]||0)+sign*v)*100)/100;
+  inp.value="";
+  document.getElementById("adjCur").textContent="currently "+fmt(F[field]);
+  const main=document.getElementById("f_"+field);
+  if(main) main.value=F[field];
+}
+function saveSheet(){
+  if(editing.tab==="stub"){ saveStub(); return; }
+  const key=editing.tab;
+  if(editing.item){
+    S[key]=S[key].map(x=>x.id===F.id?F:x);
+    const vf=(ADJ[key]||[])[0];
+    if(vf){
+      const before=Number(editing.item[vf]||0),after=Number(F[vf]||0);
+      if(Math.abs(after-before)>0.001) addLog({name:F.name,action:vf,delta:after-before});
+    }
+  } else { F.id=Date.now(); S[key].push(F); addLog({name:F.name,action:"added",delta:0}); }
+  if(F.link&&VALUE_FIELD[key]) propagateLink(F.link,F[VALUE_FIELD[key]]);
+  persist(); checkAlerts(); closeSheet(); render();
+}
+function delSheet(){
+  S[editing.tab]=S[editing.tab].filter(x=>x.id!==editing.item.id);
+  addLog({name:editing.item.name,action:"deleted",delta:0});
+  persist(); closeSheet(); render();
+}
+function fld(label,id,type,value,extra=""){
+  return `<label class="fld"><span>${label}</span><input id="${id}" type="${type}" ${type==="number"?'step="0.01" inputmode="decimal"':""} value="${esc(value)}" ${extra}></label>`;
+}
+function renderSheet(){
+  const t=editing.tab;
+  let body="";
+  if(t==="stub"){
+    const j=S.jobs.find(x=>x.id===editing.jobId);
+    const num=(id,val,sec,i,k,w)=>`<input id="${id}" type="number" step="0.01" inputmode="decimal" value="${val||""}" placeholder="0" style="width:${w}px;flex:none;padding:6px;font-size:12px" oninput="stSet('${sec}',${i},'${k}',this.value)">`;
+    const txt=(val,sec,i,k,flex,ph)=>`<input value="${esc(val)}" placeholder="${ph}" style="flex:${flex};min-width:0;padding:6px;font-size:12px" oninput="stSet('${sec}',${i},'${k}',this.value)">`;
+    const del=(sec,i)=>`<button onclick="stDel('${sec}',${i})" style="background:none;border:none;color:var(--dim);font-size:15px;width:18px;padding:0">×</button>`;
+    const head=cols=>`<div style="display:flex;gap:6px;font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin:8px 0 3px">${cols}</div>`;
+
+    const earn=F.earnings.map((e,i)=>`
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
+        ${txt(e.name,"earnings",i,"name","2","Earning")}
+        ${txt(e.jobTitle,"earnings",i,"jobTitle","2","Job title")}
+        ${num("se_hrs_"+i,e.hours,"earnings",i,"hours",58)}
+        ${num("se_rate_"+i,e.rate,"earnings",i,"rate",62)}
+        ${num("se_cur_"+i,e.cur,"earnings",i,"cur",72)}
+        ${num("se_ytd_"+i,e.ytd,"earnings",i,"ytd",72)}
+        ${del("earnings",i)}
+      </div>`).join("");
+
+    const ded=F.deductions.map((d,i)=>`
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
+        ${txt(d.name,"deductions",i,"name","2","Deduction")}
+        <select style="width:70px;flex:none;padding:6px;font-size:12px" onchange="stSet('deductions',${i},'pretax',this.value)">
+          <option value="" ${!d.pretax?"selected":""}>—</option>
+          <option value="yes" ${d.pretax==="yes"?"selected":""}>Pretax</option>
+          <option value="no" ${d.pretax==="no"?"selected":""}>Post</option>
+        </select>
+        ${num("sd_ee_"+i,d.eeCur,"deductions",i,"eeCur",70)}
+        ${num("sd_eey_"+i,d.eeYtd,"deductions",i,"eeYtd",70)}
+        ${num("sd_er_"+i,d.erCur,"deductions",i,"erCur",70)}
+        ${num("sd_ery_"+i,d.erYtd,"deductions",i,"erYtd",70)}
+        ${del("deductions",i)}
+      </div>`).join("");
+
+    const tax=F.taxes.map((x,i)=>`
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+        ${txt(x.name,"taxes",i,"name","2","Tax (e.g. Federal, NC State)")}
+        ${num("st_cur_"+i,x.cur,"taxes",i,"cur",80)}
+        ${num("st_ytd_"+i,x.ytd,"taxes",i,"ytd",80)}
+        ${del("taxes",i)}
+      </div>`).join("");
+
+    const pto=F.pto.map((p,i)=>`
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+        ${txt(p.plan,"pto",i,"plan","2","Plan (e.g. Vacation)")}
+        ${num("sp_tk_"+i,p.taken,"pto",i,"taken",64)}
+        ${num("sp_cur_"+i,p.cur,"pto",i,"cur",64)}
+        ${num("sp_bal_"+i,p.bal,"pto",i,"bal",64)}
+        ${del("pto",i)}
+      </div>`).join("");
+
+    body=`
+      <div class="hint" style="width:100%">${esc(j.name)} — copy the stub line by line. Deductions &amp; taxes autofill from your last stub once earnings are entered; type over anything that's off. Saved rows carry to the next stub (delete a row here to drop it as an option).</div>
+      <div style="display:flex;gap:10px;width:100%">
+        ${fld("Period start","f_start","date",F.start,`onchange="fSet('start',this.value)"`)}
+        ${fld("Period end","f_end","date",F.end,`onchange="fSet('end',this.value)"`)}
+        ${fld("Pay date","f_payDate","date",F.payDate,`onchange="fSet('payDate',this.value)"`)}
+      </div>
+      <div style="width:100%">
+        <div class="sec">Earnings</div>
+        ${head('<span style="flex:2">Earning</span><span style="flex:2">Job title</span><span style="width:58px">Hours</span><span style="width:62px">Rate</span><span style="width:72px">Current</span><span style="width:72px">YTD</span><span style="width:18px"></span>')}
+        ${earn}
+        <button class="btn ghost" style="padding:5px 10px;font-size:12px" onclick="stAdd('earnings')">+ Earning</button>
+
+        <div class="sec">Deductions</div>
+        ${head('<span style="flex:2">Name</span><span style="width:70px">Pretax</span><span style="width:70px">EE Cur</span><span style="width:70px">EE YTD</span><span style="width:70px">ER Cur</span><span style="width:70px">ER YTD</span><span style="width:18px"></span>')}
+        ${ded||'<div class="hint" style="margin-bottom:5px">None yet — add rows; they autofill next time.</div>'}
+        <button class="btn ghost" style="padding:5px 10px;font-size:12px" onclick="stAdd('deductions')">+ Deduction</button>
+
+        <div class="sec">Taxes</div>
+        ${head('<span style="flex:2">Tax</span><span style="width:80px">Current</span><span style="width:80px">YTD</span><span style="width:18px"></span>')}
+        ${tax||'<div class="hint" style="margin-bottom:5px">None yet — add rows (federal, state, SS, Medicare…).</div>'}
+        <button class="btn ghost" style="padding:5px 10px;font-size:12px" onclick="stAdd('taxes')">+ Tax</button>
+
+        <div class="sec">Paid time off</div>
+        ${head('<span style="flex:2">Plan</span><span style="width:64px">Taken</span><span style="width:64px">Current</span><span style="width:64px">Balance</span><span style="width:18px"></span>')}
+        ${pto||'<div class="hint" style="margin-bottom:5px">Optional.</div>'}
+        <button class="btn ghost" style="padding:5px 10px;font-size:12px" onclick="stAdd('pto')">+ PTO plan</button>
+
+        <div id="stubTotals" style="margin-top:12px">${stubTotalsHTML()}</div>
+      </div>`;
+  } else {
+    body=fld("Name","f_name","text",F.name,`oninput="fSet('name',this.value)"`);
+    if(t==="monthly"){
+      const opts=[...S.cash.map(a=>a.name),...S.credit.map(c=>c.name)];
+      body+=fld("Due day (0 = none)","f_due","number",F.due,`oninput="fSetNum('due',this.value)"`);
+      body+=fld("Amount","f_amt","number",F.amt,`oninput="fSetNum('amt',this.value)"`);
+      body+=fld("Outstanding debt","f_debt","number",F.debt,`oninput="fSetNum('debt',this.value)"`);
+      body+=fld("APR % (for loans)","f_apr","number",F.apr||0,`oninput="fSetNum('apr',this.value)"`);
+      body+=`<label class="fld" style="min-width:140px"><span>Pays from account</span>
+        <select onchange="fSet('acct',this.value)">
+          <option value="">— none —</option>
+          ${opts.map(a=>`<option value="${esc(a)}" ${F.acct===a?"selected":""}>${esc(a)}</option>`).join("")}
+        </select></label>`;
+      body+=`<div style="width:100%;padding:10px;background:var(--panel2);border:1px solid var(--line);border-radius:10px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--amber);margin-bottom:8px">This month only — scheduled for a different amount?</div>
+        <div style="display:flex;gap:10px">
+          ${fld("Scheduled amount","f_schedAmt","number",F.schedAmt||"",`oninput="fSetNum('schedAmt',this.value)" placeholder="0.00"`)}
+          ${fld("Scheduled date","f_schedDate","date",F.schedDate||"",`onchange="fSet('schedDate',this.value)"`)}
+        </div>
+        <div class="hint" style="margin-top:6px">Overrides the recurring amount this month. Clears at month rollover.</div>
+      </div>`;
+      body+=fld("Note","f_note","text",F.note,`oninput="fSet('note',this.value)"`);
+    }
+    if(t==="annual"){
+      body+=fld("Due date","f_date","date",F.date,`onchange="fSet('date',this.value)"`);
+      body+=fld("Amount","f_amt","number",F.amt,`oninput="fSetNum('amt',this.value)"`);
+    }
+    if(t==="invest"){
+      body+=fld("Balance","f_amt","number",F.amt,`oninput="fSetNum('amt',this.value)"`);
+      body+=fld("Goal","f_goal","number",F.goal,`oninput="fSetNum('goal',this.value)"`);
+      body+=fld("APY %","f_apy","number",F.apy,`oninput="fSetNum('apy',this.value)"`);
+    }
+    if(t==="cash"){
+      body+=fld("Balance","f_amt","number",F.amt,`oninput="fSetNum('amt',this.value)"`);
+      body+=fld("Purpose tag","f_tag","text",F.tag,`oninput="fSet('tag',this.value)"`);
+      body+=`<div style="display:flex;gap:10px;width:100%">
+        ${fld("Last 4 digits","f_last4","text",F.last4||"",`oninput="fSet('last4',this.value)" maxlength="4" placeholder="1234"`)}
+        <label class="fld" style="max-width:130px"><span>Digits are for</span>
+          <select onchange="fSet('l4type',this.value)">
+            <option value="account" ${(F.l4type||"account")==="account"?"selected":""}>Account #</option>
+            <option value="card" ${F.l4type==="card"?"selected":""}>Card #</option>
+          </select></label>
+      </div>`;
+      body+=fld("Link to app/site (URL, optional)","f_url","text",F.url||"",`oninput="fSet('url',this.value)" placeholder="secu.org or app link"`);
+      body+=fld("Minimum to keep open ($)","f_minKeep","number",F.minKeep||0,`oninput="fSetNum('minKeep',this.value)"`);
+      body+=`<label style="display:flex;align-items:center;gap:8px;width:100%;cursor:pointer;margin-top:4px">
+        <input type="checkbox" ${F.savings?"checked":""} onchange="fSetBool('savings',this.checked)" style="width:18px;height:18px;accent-color:var(--purple)">
+        <span style="font-size:13px">Savings account <span class="d">(excluded from spendable)</span></span></label>`;
+    }
+    if(t==="credit"){
+      body+=fld("Limit","f_limit","number",F.limit,`oninput="fSetNum('limit',this.value)"`);
+      body+=fld("Debt","f_debt","number",F.debt,`oninput="fSetNum('debt',this.value)"`);
+      body+=fld("APR %","f_apr","number",F.apr,`oninput="fSetNum('apr',this.value)"`);
+      body+=fld("Last 4 of card #","f_last4","text",F.last4||"",`oninput="fSet('last4',this.value)" maxlength="4" placeholder="1234"`);
+      body+=fld("Link to app/site (URL, optional)","f_url","text",F.url||"",`oninput="fSet('url',this.value)" placeholder="robinhood.com or app link"`);
+      body+=fld("Note","f_note","text",F.note,`oninput="fSet('note',this.value)"`);
+    }
+    if(t==="misc"){
+      body+=fld("Monthly budget","f_budget","number",F.budget,`oninput="fSetNum('budget',this.value)"`);
+      body+=fld("Spent so far","f_spent","number",F.spent,`oninput="fSetNum('spent',this.value)"`);
+    }
+    if(t!=="annual"&&t!=="misc"){
+      body+=fld("Sync key (same key = synced everywhere)","f_link","text",F.link||"",`oninput="fSet('link',this.value)"`);
+    }
+  }
+  let adjHtml="";
+  const adj=ADJ[t];
+  if(adj&&editing.item){
+    adjHtml=`<div class="adj">
+      <div class="lbl">Quick adjust ${adj[1]} · <span id="adjCur">currently ${fmt(F[adj[0]])}</span></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="adjbtn m" onclick="applyAdj(-1)">−</button>
+        <input id="adjIn" type="number" step="0.01" inputmode="decimal" placeholder="0.00" style="flex:1;background:var(--bg);text-align:center;font-size:18px;padding:12px" onkeydown="if(event.key==='Enter')applyAdj(1)">
+        <button class="adjbtn p" onclick="applyAdj(1)">+</button>
+      </div>
+      <div class="hint" style="margin-top:6px">Type an amount, tap + or −. Hit Save to keep it.</div>
+    </div>`;
+  }
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet">
+        <h3>${editing.item?"Edit":t==="stub"?"Enter":"Add"} ${TITLES[t]}</h3>
+        <div class="frm">${body}</div>
+        ${adjHtml}
+        <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
+          ${editing.item?'<button class="btn danger" onclick="delSheet()">Delete</button>':""}
+          <button class="btn ghost" onclick="closeSheet()">Cancel</button>
+          <button class="btn" onclick="saveSheet()">${t==="stub"?"Save stub":"Save"}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ---------- render helpers ----------
+const INFO={
+  spend:{t:"Total Extra Cash Available",b:"Non-savings cash minus the minimum balances each account needs to stay open. This is money you can spend without touching savings or dipping below account minimums. It does NOT subtract upcoming bills — check \"Due by payday\" before spending it all."},
+  payday:{t:"Payday schedule",b:"Repeats every 2 weeks from the date you set. If you sometimes get paid early, set this to the guaranteed (later) date so the countdown never over-promises."},
+  duemonth:{t:"Total due this month",b:"Every unpaid monthly bill remaining this month — the ones due before your next paycheck plus everything after it until the month ends."},
+  monthbudget:{t:"Monthly budget",b:"Everything you expect to spend this month: all monthly bills (full recurring amounts, paid or not) plus every misc category budget (food, gas, etc). This is your total planned outflow — compare it to your monthly income to see how much room you have to adjust."},
+  netw:{t:"Net worth",b:"Total cash + investments − total debt (cards and loans)."},
+};
+function infoPop(key){
+  const i=INFO[key]; if(!i) return;
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="menu" style="padding:16px">
+        <div style="font-weight:700;font-size:15px;margin-bottom:8px">${i.t}</div>
+        <div style="font-size:13px;color:var(--dim);line-height:1.5">${i.b}</div>
+        <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
+      </div>
+    </div>`;
+}
+function openExt(u,ev){
+  if(ev) ev.stopPropagation();
+  if(!/^https?:\/\//i.test(u)) u="https://"+u;
+  if(typeof window!=="undefined"&&window.Android&&window.Android.openUrl){ try{ window.Android.openUrl(u); return; }catch(e){} }
+  try{ window.open(u,"_blank"); }catch(e){}
+}
+function applyTheme(){ document.body.className = S.settings.theme==="light" ? "light" : ""; }
+function toggleTheme(){ S.settings.theme = S.settings.theme==="light" ? "dark" : "light"; persist(); applyTheme(); openMenu(); }
+
+function pfpHTML(size){
+  const p=S.profile;
+  const inner = p.photo ? `<img src="${p.photo}" alt="">`
+    : `<svg viewBox="0 0 24 24" width="${size-14}" height="${size-14}" fill="none" stroke="var(--dim)" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 5-5.5 8-5.5s6.5 1.5 8 5.5"/></svg>`;
+  return inner;
+}
+function openMenu(){
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="menu">
+        <button onclick="openProfilePage()">👤 &nbsp;Personal information</button>
+        <button onclick="openStubsPage()">🧾 &nbsp;Pay stubs</button>
+        <button onclick="toggleTheme()">${S.settings.theme==="light"?"🌙 &nbsp;Switch to dark theme":"☀️ &nbsp;Switch to light theme"}</button>
+        <button class="d" onclick="closeSheet()">Close</button>
+      </div>
+    </div>`;
+}
+
+// ---- personal information ----
+let P=null;
+function openProfilePage(){
+  P={...S.profile};
+  renderProfilePage();
+}
+function renderProfilePage(){
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet">
+        <h3>Personal information</h3>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+          <div class="pfp" style="width:64px;height:64px;border-radius:32px" id="ppPrev">${P.photo?`<img src="${P.photo}">`:pfpHTML(64)}</div>
+          <div>
+            <button class="btn ghost" onclick="document.getElementById('ppFile').click()">Edit profile photo</button>
+            ${P.photo?'<button class="btn ghost" style="margin-left:6px" onclick="P.photo=\'\';renderProfilePage()">Remove</button>':""}
+            <input id="ppFile" type="file" accept="image/*" style="display:none" onchange="photoPick(this)">
+          </div>
+        </div>
+        <div class="frm">
+          ${fld("Full name","pp_name","text",P.name,`oninput="P.name=this.value"`)}
+          ${fld("What should we call you? (nickname)","pp_nick","text",P.nick,`oninput="P.nick=this.value"`)}
+          ${fld("Email","pp_email","text",P.email,`oninput="P.email=this.value"`)}
+          ${fld("Phone number","pp_phone","text",P.phone,`oninput="P.phone=this.value"`)}
+        </div>
+        <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
+          <button class="btn ghost" onclick="closeSheet()">Cancel</button>
+          <button class="btn" onclick="saveProfile()">Save</button>
+        </div>
+      </div>
+    </div>`;
+}
+function photoPick(inp){
+  const f=inp.files&&inp.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    // downscale so localStorage stays small
+    const img=new Image();
+    img.onload=()=>{
+      const cv=document.createElement("canvas");
+      const s=Math.min(1,256/Math.max(img.width,img.height));
+      cv.width=Math.round(img.width*s); cv.height=Math.round(img.height*s);
+      cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);
+      P.photo=cv.toDataURL("image/jpeg",0.8);
+      renderProfilePage();
+    };
+    img.src=rd.result;
+  };
+  rd.readAsDataURL(f);
+}
+function saveProfile(){ S.profile={...P}; persist(); closeSheet(); render(); }
+
+// ---- pay stubs page ----
+let stubSelJob=null, stubSelId=null;
+function openStubsPage(jid){
+  stubSelJob = jid ?? stubSelJob;
+  const withStubs=S.jobs.filter(j=>(j.stubs||[]).length);
+  if(stubSelJob==null || !S.jobs.find(j=>j.id===stubSelJob&&(j.stubs||[]).length)) stubSelJob=withStubs.length?withStubs[0].id:null;
+  const j=S.jobs.find(x=>x.id===stubSelJob);
+  if(j && (!stubSelId || !j.stubs.find(s=>s.id===stubSelId))) stubSelId=j.stubs.length?j.stubs[0].id:null;
+  renderStubsPage();
+}
+function stubsJobSel(v){ stubSelJob=parseFloat(v); stubSelId=null; openStubsPage(); }
+function stubsDateSel(v){ stubSelId=parseFloat(v); renderStubsPage(); }
+function renderStubsPage(){
+  const withStubs=S.jobs.filter(j=>(j.stubs||[]).length);
+  const j=S.jobs.find(x=>x.id===stubSelJob);
+  const stub=j?j.stubs.find(s=>s.id===stubSelId):null;
+  const jobOpts=withStubs.map(x=>`<option value="${x.id}" ${x.id===stubSelJob?"selected":""}>${esc(x.name)}${x.archived?" (archived)":""}</option>`).join("");
+  const dateOpts=j?j.stubs.map(s=>`<option value="${s.id}" ${s.id===stubSelId?"selected":""}>${s.payDate?fmtDate(s.payDate):(s.end?("period end "+fmtDate(s.end)):"undated")}</option>`).join(""):"";
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet">
+        <h3>Pay stubs</h3>
+        ${withStubs.length?`
+        <div style="display:flex;gap:10px;margin-bottom:12px">
+          <label class="fld"><span>Company</span><select onchange="stubsJobSel(this.value)">${jobOpts}</select></label>
+          <label class="fld"><span>Pay date</span><select onchange="stubsDateSel(this.value)">${dateOpts}</select></label>
+        </div>
+        ${stub?stubDetailHTML(j,stub):""}`
+        :'<div class="hint">No pay stubs saved yet. Enter one from Budget → Jobs.</div>'}
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+          ${stub?`<button class="btn danger" onclick="delStubFromPage(${j.id},${stub.id})">Delete stub</button>`:""}
+          <button class="btn ghost" onclick="closeSheet()">Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+function delStubFromPage(jid,sid){
+  if(!confirm("Delete this stub from history?")) return;
+  S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,stubs:j.stubs.filter(s=>s.id!==sid)});
+  stubSelId=null; persist(); openStubsPage(); render(true);
+}
+function stubDetailHTML(j,s){
+  const trow=(cells,head)=>`<div class="trow ${head?"thead":""}">${cells.map(c=>`<span style="flex:1;min-width:0">${c}</span>`).join("")}</div>`;
+  const earn=(s.earnings||[]).map(e=>trow([esc(e.name),esc(e.jobTitle||""),Number(e.hours||0).toFixed(2),fmt(e.rate),fmt(e.cur),fmt(e.ytd)])).join("");
+  const ded=(s.deductions||[]).map(d=>trow([esc(d.name),d.pretax==="yes"?"Pre":"—",fmt(d.eeCur),fmt(d.eeYtd),fmt(d.erCur),fmt(d.erYtd)])).join("");
+  const tax=(s.taxes||[]).map(t=>trow([esc(t.name),fmt(t.cur),fmt(t.ytd)])).join("");
+  const pto=(s.pto||[]).map(p=>trow([esc(p.plan),Number(p.taken||0).toFixed(2),Number(p.cur||0).toFixed(2),Number(p.bal||0).toFixed(2)])).join("");
+  const sum=s.summary||{cur:{},ytd:{}};
+  return `
+    <div class="sub" style="margin-bottom:8px">${s.start||s.end?`Period ${fmtDate(s.start)} – ${fmtDate(s.end)}`:""}${s.payDate?` · Paid ${fmtDate(s.payDate)}`:""}${s.hours!=null?` · ${Number(s.hours).toFixed(2)} total hrs`:""}</div>
+    ${(s.earnings||[]).length?`<div class="sec">Earnings</div><div class="stubtbl">${trow(["Earning","Title","Hrs","Rate","Current","YTD"],1)}${earn}</div>`:""}
+    ${(s.deductions||[]).length?`<div class="sec">Deductions</div><div class="stubtbl">${trow(["Name","Pretax","EE Cur","EE YTD","ER Cur","ER YTD"],1)}${ded}</div>`:""}
+    ${(s.taxes||[]).length?`<div class="sec">Taxes</div><div class="stubtbl">${trow(["Tax","Current","YTD"],1)}${tax}</div>`:""}
+    ${(s.pto||[]).length?`<div class="sec">Paid time off</div><div class="stubtbl">${trow(["Plan","Taken","Current","Balance"],1)}${pto}</div>`:""}
+    <div class="sec">Plan summary</div>
+    <div class="stubtbl">
+      ${trow(["","Gross taxable","Taxes","Deductions","Net pay"],1)}
+      ${trow(["Current",fmt(sum.cur.gtw),fmt(sum.cur.tax),fmt(sum.cur.ded),`<b class="g">${fmt(sum.cur.net)}</b>`])}
+      ${trow(["YTD",fmt(sum.ytd.gtw),fmt(sum.ytd.tax),fmt(sum.ytd.ded),fmt(sum.ytd.net)])}
+    </div>
+    ${s.gross!=null&&!s.earnings?`<div class="sub" style="margin-top:6px">Legacy stub: gross ${fmt(s.gross)}, net ${fmt(s.net)}</div>`:""}`;
+}
+
+// ---- job edit sheet ----
+function jeAddRate(jid){ S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:[...j.rates,{id:Date.now(),name:"New rate",rate:0,hours:0}]}); persist(); openJobEdit(jid); }
+function jeDelRate(jid,rid){ S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:j.rates.filter(r=>r.id!==rid)}); persist(); openJobEdit(jid); }
+function archiveJob(jid,flag){
+  S.jobs=S.jobs.map(j=>j.id===jid?{...j,archived:flag}:j);
+  persist(); render();
+  if(flag) openArchived(); else closeSheet();
+}
+function openArchived(){
+  const arch=S.jobs.filter(j=>j.archived);
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="menu" style="padding:14px">
+        <div style="font-weight:700;font-size:15px;margin-bottom:10px">Archived jobs</div>
+        ${arch.length?arch.map(j=>`
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)">
+            <div><div class="name">${esc(j.name)}</div><div class="sub">${(j.stubs||[]).length} stub(s) kept</div></div>
+            <div style="display:flex;gap:6px">
+              <button class="btn ghost" style="width:auto;padding:6px 10px;font-size:12px;border-bottom:1px solid var(--line)" onclick="archiveJob(${j.id},false)">Unarchive</button>
+              <button class="btn danger" style="width:auto;padding:6px 10px;font-size:12px" onclick="jeDelete(${j.id})">Delete</button>
+            </div>
+          </div>`).join(""):'<div class="hint">No archived jobs. Archiving a job keeps its pay history in Pay stubs.</div>'}
+        <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
+      </div>
+    </div>`;
+}
+function jeDelete(jid){
+  const j=S.jobs.find(x=>x.id===jid);
+  if(!confirm(`Delete "${j.name}" AND its ${(j.stubs||[]).length} stub(s)? Archive instead if you want to keep pay history.`)) return;
+  S.jobs=S.jobs.filter(x=>x.id!==jid);
+  persist(); closeSheet(); render();
+}
+function openJobEdit(jid){
+  const j=S.jobs.find(x=>x.id===jid);
+  const rates=j.rates.map(r=>`
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <input value="${esc(r.name)}" style="flex:2;min-width:0" oninput="jobRateField(${j.id},${r.id},'name',this.value)">
+      <input type="number" step="0.01" inputmode="decimal" value="${r.rate||""}" placeholder="$/hr" style="width:70px;flex:none" oninput="jobRateField(${j.id},${r.id},'rate',this.value)">
+      <input type="number" step="0.01" inputmode="decimal" value="${r.hours||""}" placeholder="hrs" style="width:64px;flex:none" oninput="jobRateField(${j.id},${r.id},'hours',this.value)">
+      <button onclick="jeDelRate(${j.id},${r.id})" style="background:none;border:none;color:var(--dim);font-size:16px;width:20px;padding:2px">×</button>
+    </div>`).join("");
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet">
+        <h3>Edit job</h3>
+        <div class="frm" style="margin-bottom:12px">
+          ${fld("Job name","je_name","text",j.name,`oninput="jobField(${j.id},'name',this.value)"`)}
+          <label class="fld" style="min-width:150px"><span>How often paid</span>
+            <select onchange="jobField(${j.id},'freq',this.value)">
+              ${Object.entries(FREQ).map(([k,v])=>`<option value="${k}" ${j.freq===k?"selected":""}>${v.label}</option>`).join("")}
+            </select></label>
+        </div>
+        <div class="sec">Rates &amp; hours this period</div>
+        ${rates||'<div class="hint" style="margin-bottom:6px">Add a rate to estimate pay between stubs.</div>'}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 4px">
+          <button class="btn ghost" onclick="jeAddRate(${j.id})">+ Rate</button>
+          <button class="btn ghost" onclick="if(confirm('Reset hours to 0?')){S.jobs=S.jobs.map(x=>x.id!==${j.id}?x:{...x,rates:x.rates.map(r=>({...r,hours:0}))});persist();openJobEdit(${j.id});}">New period ↺</button>
+        </div>
+        <div class="krow" style="margin-top:8px"><div class="kl">Deduction+tax rate (learned from stubs)</div>
+          <div style="display:flex;align-items:center;gap:4px">
+            <input type="number" step="0.01" inputmode="decimal" value="${j.pct||""}" placeholder="0" style="width:70px;text-align:right;padding:4px 8px" oninput="jobField(${j.id},'pct',this.value)"><span class="d" style="font-size:12px">%</span>
+          </div></div>
+        <div style="display:flex;gap:10px;margin-top:20px;justify-content:space-between;flex-wrap:wrap">
+          <div style="display:flex;gap:8px">
+            <button class="btn danger" onclick="jeDelete(${j.id})">Delete</button>
+            <button class="btn ghost" onclick="archiveJob(${j.id},${j.archived?"false":"true"})">${j.archived?"Unarchive":"Archive"}</button>
+          </div>
+          <button class="btn" onclick="closeSheet();render()">Done</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bar(pct,color){ return `<div class="bar"><div style="width:${Math.min(100,pct)}%;background:${color}"></div></div>`; }
+function krow(label,value,cls="",big=false,top=false){
+  return `<div class="krow ${big?"big":""} ${top?"top":""}"><div class="kl">${label}</div><div class="kv ${cls}">${value}</div></div>`;
+}
+function hdrStatsHTML(c){
+  return `
+    <div><div class="stat-l">Spendable Cash</div><div class="stat-v ${c.totalToSpend>=0?"g":"r"}">${fmt(c.totalToSpend)}</div></div>
+    <div><div class="stat-l">Due By Payday</div><div class="stat-v ${c.dueBeforeTotal>0?"a":"g"}">${fmt(c.dueBeforeTotal)}</div></div>
+    <div><div class="stat-l">Total Cash</div><div class="stat-v">${fmt(c.cashTotal)}</div></div>
+    <div><div class="stat-l">Total Debt</div><div class="stat-v r">${fmt(c.totalDebt)}</div></div>
+    <div><div class="stat-l">Net Worth</div><div class="stat-v ${c.netWorth>=0?"g":"r"}">${fmt(c.netWorth)}</div></div>`;
+}
+function dueColor(b){ if(b.paid) return "var(--green)"; if(!b.due) return "var(--dim)"; if(b.due<todayDay) return "var(--red)"; if(b.due-todayDay<=3) return "var(--amber)"; return "var(--dim)"; }
+
+// ---------- tabs ----------
+let payTab="est";
+function setPayTab(t){ payTab=t; render(true); }
+
+function estimatesHTML(c){
+  if(!S.jobs.filter(j=>!j.archived).length)
+    return `<div class="card"><div class="hint">Add a job under the Jobs tab, enter a paystub, and income estimates show here.</div></div>`;
+  const perJob=c.jobCalcs.map(j=>
+    krow(esc(j.job.name)+` (${FREQ[j.job.freq]?.label||j.job.freq}, ${j.job.stubs.length?"avg of "+j.job.stubs.length+" stub"+(j.job.stubs.length>1?"s":""):"current entry"})`,fmt(j.avgNet)+"/check")).join("");
+  return `<div class="card">
+    ${perJob}
+    ${krow("Upcoming week",fmt(c.estWeek),"g",false,true)}
+    ${krow("This month",fmt(c.estMonth),"g",true)}
+    ${krow("Year total",fmt(c.estYear),"g",true)}
+    ${krow("Month vs monthly bills ("+fmt(c.mTotal)+")",fmt(c.estMonth-c.mTotal),c.estMonth-c.mTotal>=0?"g":"r",false,true)}
+    <div class="hint" style="margin-top:8px">Net income, based on average per check × pay frequency. More stubs = better estimates.</div>
+  </div>`;
+}
+
+function jobsListHTML(c){
+  const active=c.jobCalcs;
+  const rows=active.map(jc=>{
+    const j=jc.job;
+    return `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <div class="name" style="font-size:15px">${esc(j.name)}</div>
+        <div class="sub">${FREQ[j.freq]?.label||j.freq}</div>
+      </div>
+      ${krow("Gross this period",fmt(jc.gross))}
+      ${krow("Total hours",jc.hours.toFixed(2))}
+      ${krow("Estimated net",fmt(jc.net),"g",true)}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn green" onclick="openStub(${j.id})">Enter stub</button>
+        <button class="btn ghost" onclick="openJobEdit(${j.id})">Edit</button>
+        <button class="btn ghost" onclick="openStubsPage(${j.id})">History (${(j.stubs||[]).length})</button>
+      </div>
+    </div>`;
+  }).join("");
+  const arch=S.jobs.filter(j=>j.archived);
+  return `${active.length?rows:'<div class="card"><div class="hint">No jobs yet. Add one, then enter a paystub — the app learns your deductions and estimates net pay going forward.</div></div>'}
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn ghost" onclick="addJob()">+ Add job</button>
+      ${arch.length?`<button class="btn ghost" onclick="openArchived()">Archived (${arch.length})</button>`:""}
+    </div>`;
+}
+
+function budgetTab(c){
+  const dueList=c.dueBefore.map(b=>`<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--dim);padding:2px 0 2px 12px">
+    <span>${esc(b.name)} <span class="${b.due<todayDay?"r":"d"}">(the ${b.due})</span></span><span class="mono">${fmt(c.eff(b))}</span></div>`).join("");
+  const misc=S.misc.map(m=>{
+    const pct=m.budget?(m.spent/m.budget)*100:0;
+    return `<div style="margin-bottom:12px;cursor:pointer" onclick="openEdit('misc',${m.id})">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span style="font-weight:600;font-size:13px">${esc(m.name)}</span>
+        <span class="mono ${pct>100?"r":"d"}" style="font-size:12px">${fmt(m.spent)} / ${fmt(m.budget)}</span>
+      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}</div>`;
+  }).join("");
+  const log=S.log.slice(0,15).map(e=>`
+    <div class="logrow">
+      <span class="mono d" style="flex-shrink:0">${new Date(e.ts).toLocaleDateString("en-US",{month:"numeric",day:"numeric"})}</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name)} <span class="d">· ${esc(e.action)}</span></span>
+      ${Math.abs(e.delta)>0.001?`<span class="mono ${e.delta>0&&(e.action==="spent"||e.action==="debt")?"r":"g"}" style="font-weight:600">${e.delta>0?"+":""}${fmt(e.delta)}</span>`:""}
+    </div>`).join("");
+  const st=S.settings;
+  return `
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <div class="sec" style="margin:0">Next payday</div>
+      <input type="date" value="${S.payAnchor}" style="width:150px" onchange="anchorChange(this.value)">
+    </div>
+    ${c.payday?`
+      <div class="mono b" style="font-size:22px;font-weight:700;cursor:pointer" onclick="infoPop('payday')">${c.payday.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}
+        <span class="d" style="font-size:13px;font-weight:500"> · ${c.daysToPay===0?"today":"in "+c.daysToPay+" day"+(c.daysToPay>1?"s":"")} ⓘ</span></div>`
+      :`<div class="hint">Pick your next payday to unlock the countdown and "due by payday" tracking.</div>`}
+    <div style="margin-top:12px">
+      ${c.payday?krow(`Bills due before payday (${c.dueBefore.length})`,fmt(c.dueBeforeTotal),"a")+dueList:""}
+      ${krow(`<span style="cursor:pointer" onclick="infoPop('duemonth')">Total due this month ⓘ</span>`,fmt(c.mLeft),"a")}
+      ${krow(`<span style="cursor:pointer" onclick="infoPop('monthbudget')">Monthly budget · bills + misc ⓘ</span>`,fmt(c.mTotal+c.miscBudget),"b")}
+      ${krow("Misc budget left",fmt(c.miscLeft))}
+      ${krow("Cash (savings excluded)",fmt(c.spendCash))}
+      ${krow("Savings",fmt(c.savingsTotal),"p")}
+      ${krow(`<span style="cursor:pointer" onclick="infoPop('spend')">Total Extra Cash Available ⓘ</span>`,fmt(c.totalToSpend),c.totalToSpend>=0?"g":"r",true,true)}
+    </div>
+  </div>
+  <div class="card">
+    <div class="sec" style="margin-top:0">Misc spending${S.misc.length?` · ${fmt(c.miscSpent)} of ${fmt(c.miscBudget)}`:""}</div>
+    ${S.misc.length?misc:'<div class="hint" style="margin-bottom:10px">Track variable spending like food, gas, laundry against monthly budgets.</div>'}
+    <button class="btn ghost" onclick="openEdit('misc',null)">+ Add category</button>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0 10px">
+    <div class="sec" style="margin:0">Jobs &amp; pay</div>
+    <div style="display:flex;gap:6px">
+      <button class="tab ${payTab==="est"?"on":""}" onclick="setPayTab('est')">📊 Estimates</button>
+      <button class="tab ${payTab==="jobs"?"on":""}" onclick="setPayTab('jobs')">Jobs</button>
+    </div>
+  </div>
+  ${payTab==="est"?estimatesHTML(c):jobsListHTML(c)}
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div class="sec" style="margin:0">Alerts &amp; notifications</div>
+      <button class="btn ${st.notif?"green":"ghost"}" onclick="toggleNotif(${st.notif?"false":"true"})">${st.notif?"On ✓":"Turn on"}</button>
+    </div>
+    <div class="frm">
+      ${fld("Low account balance ($)","s_low","number",st.lowBal,`oninput="settingChange('lowBal',this.value)"`)}
+      ${fld("Card usage alert (%)","s_cc","number",st.ccPct,`oninput="settingChange('ccPct',this.value)"`)}
+      ${fld("Bill due warning (days)","s_due","number",st.dueDays,`oninput="settingChange('dueDays',this.value)"`)}
+    </div>
+    <div class="hint" style="margin-top:8px">Alerts check when the app opens and every 30 min while it's open. Active alerts also show at the top of the app.</div>
+  </div>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div class="sec" style="margin:0">History</div>
+      ${S.log.length?'<button class="btn ghost" onclick="clearLog()">Clear</button>':""}
+    </div>
+    ${S.log.length?log:'<div class="hint">Changes show up here — payments, +/− adjustments, adds and deletes.</div>'}
+  </div>
+  <div class="card">
+    <div class="sec" style="margin-top:0">Backup &amp; restore</div>
+    <div style="display:flex;gap:10px;margin-bottom:8px">
+      <button class="btn" onclick="doBackup()">Backup</button>
+      <button class="btn ghost" onclick="doCopy()">Copy</button>
+      <button class="btn ghost" onclick="doRestore()">Restore</button>
+    </div>
+    ${backupStatus?`<div style="font-size:12px;font-weight:600;margin-bottom:8px" class="${backupStatus.startsWith("✗")?"r":"g"}">${backupStatus}</div>`:""}
+    <textarea id="bk" placeholder="Backup appears here / paste one here to restore" style="height:70px;font-size:10px;resize:vertical"></textarea>
+  </div>
+  <div class="card" style="border-color:rgba(244,116,107,.35)">
+    <div class="sec r" style="margin-top:0">Danger zone</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div class="hint">Wipe all data and start over from scratch.</div>
+      <button class="btn danger" onclick="resetApp()">Reset app</button>
+    </div>
+  </div>`;
+}
+
+function monthlyTab(c){
+  if(!S.monthly.length) return `<div class="empty">No monthly bills yet.<br>Tap + to add your first one.</div>`;
+  const rows=[...S.monthly].sort((a,b)=>(a.due||99)-(b.due||99)).map(b=>`
+    <div class="row-item" style="border-left:3px solid ${dueColor(b)}" onclick="openEdit('monthly',${b.id})">
+      <button class="chk ${b.paid?"on":""}" onclick="event.stopPropagation();togglePaid('monthly',${b.id})">${b.paid?"✓":""}</button>
+      <div style="flex:1;min-width:0">
+        <div class="name" style="${b.paid?"text-decoration:line-through;opacity:.55":""}">${esc(b.name)}${b.link?'<span class="lnk">⟲</span>':""}${b.acct?`<span class="chip">${esc(b.acct)}</span>`:""}</div>
+        <div class="sub">${b.due?"Due the "+ord(b.due):"No due date"}${b.debt>0?` <span class="r">· owes ${fmt(b.debt)}</span>`:""}</div>
+        ${b.schedAmt>0?`<div style="font-size:11px;color:var(--amber);margin-top:2px">⏱ Scheduled ${fmt(b.schedAmt)}${b.schedDate?" on "+fmtDate(b.schedDate):""}</div>`:""}
+      </div>
+      <div style="text-align:right;${b.paid?"opacity:.5":""}">
+        <div class="amt">${fmt(b.schedAmt>0?b.schedAmt:b.amt)}</div>
+        ${b.schedAmt>0?`<div class="mono d" style="font-size:10px;text-decoration:line-through">${fmt(b.amt)}</div>`:""}
+      </div>
+    </div>`).join("");
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 12px">
+      <div class="mono d" style="font-size:13px">${fmt(c.mTotal-c.mLeft)} / ${fmt(c.mTotal)} paid</div>
+      <button class="btn ghost" onclick="resetMonthBills()">Reset ↺</button>
+    </div>
+    ${bar(((c.mTotal-c.mLeft)/(c.mTotal||1))*100,"var(--green)")}
+    <div style="height:14px"></div>${rows}
+    ${c.mDebt>0?`<div class="mono d" style="margin-top:12px;font-size:12px">Total outstanding debt: <span class="r">${fmt(c.mDebt)}</span></div>`:""}`;
+}
+
+function annualTab(c){
+  if(!S.annual.length) return `<div class="empty">No annual bills yet.<br>Tap + to add one.</div>`;
+  const rows=[...S.annual].sort((a,b)=>a.date.localeCompare(b.date)).map(b=>`
+    <div class="row-item" onclick="openEdit('annual',${b.id})">
+      <button class="chk ${b.paid?"on":""}" onclick="event.stopPropagation();togglePaid('annual',${b.id})">${b.paid?"✓":""}</button>
+      <div style="flex:1">
+        <div class="name" style="${b.paid?"text-decoration:line-through;opacity:.55":""}">${esc(b.name)}</div>
+        <div class="sub">${new Date(b.date+"T12:00").toLocaleDateString("en-US",{month:"short",day:"numeric"})}</div>
+      </div>
+      <div class="amt" style="${b.paid?"opacity:.5":""}">${fmt(b.amt)}</div>
+    </div>`).join("");
+  return `
+    <div class="mono d" style="font-size:13px;margin:6px 0 12px">${fmt(c.aLeft)} left of ${fmt(c.aTotal)} this year</div>
+    ${bar(((c.aTotal-c.aLeft)/(c.aTotal||1))*100,"var(--green)")}
+    <div style="height:14px"></div>${rows}`;
+}
+
+let debtSort="payoff";
+function setDebtSort(v){ debtSort=v; render(true); }
+function debtTab(c){
+  const cards=S.credit.filter(x=>x.debt>0).map(x=>({...x,kind:"credit",type:"Card"}));
+  const loans=S.monthly.filter(b=>(b.debt||0)>0&&!b.link).map(b=>({...b,kind:"monthly",type:"Loan",apr:b.apr||0}));
+  let all=[...cards,...loans];
+  if(!all.length) return `<div class="empty">No debt tracked. 🎉<br>Card debts and loan balances show here.</div>`;
+  const sorters={
+    payoff:(a,b)=>b.apr-a.apr,
+    name:(a,b)=>a.name.localeCompare(b.name),
+    amtHigh:(a,b)=>b.debt-a.debt,
+    amtLow:(a,b)=>a.debt-b.debt,
+    apr:(a,b)=>b.apr-a.apr,
+    section:(a,b)=>a.type.localeCompare(b.type)||b.apr-a.apr,
+  };
+  all.sort(sorters[debtSort]||sorters.payoff);
+  const totalDebt=all.reduce((s,x)=>s+x.debt,0);
+  const mi=all.reduce((s,x)=>s+x.debt*(x.apr||0)/100/12,0);
+  const row=(x,i)=>{
+    const m=x.debt*(x.apr||0)/100/12;
+    return `<div class="row-item" style="border-left:3px solid ${x.apr>20?"var(--red)":x.apr>0?"var(--amber)":"var(--green)"}" onclick="openEdit('${x.kind}',${x.id})">
+      ${debtSort==="payoff"?`<div class="mono d" style="font-size:18px;font-weight:700;width:24px">${i+1}</div>`:""}
+      <div style="flex:1">
+        <div class="name">${esc(x.name)}${x.last4?` <span class="mono d" style="font-size:11px">••${esc(x.last4)}</span>`:""}${x.link?'<span class="lnk">⟲</span>':""}<span class="chip">${x.type}</span></div>
+        <div class="sub">${x.apr||0}% APR${m>0.01?` <span class="a">· ~${fmt(m)}/mo interest</span>`:""}${x.note?" · "+esc(x.note):""}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">${x.url?`<button class="btn ghost" style="padding:4px 8px;font-size:12px" onclick="openExt('${esc(x.url)}',event)">↗</button>`:""}<div class="amt r">${fmt(x.debt)}</div></div>
+    </div>`;
+  };
+  let rows;
+  if(debtSort==="section"){
+    const grp=t=>all.filter(x=>x.type===t);
+    rows=["Card","Loan"].map(t=>{
+      const g=grp(t);
+      return g.length?`<div class="sec">${t==="Card"?"Credit cards":"Loans"} · ${fmt(g.reduce((s,x)=>s+x.debt,0))}</div>${g.map(row).join("")}`:"";
+    }).join("");
+  } else rows=all.map(row).join("");
+  return `
+    <div class="card">
+      ${krow("Total debt (cards + loans)",fmt(totalDebt),"r")}
+      ${krow("Interest cost per month (approx)",fmt(mi),"a")}
+      ${krow("Per year if balances stay flat",fmt(mi*12),"a")}
+      ${debtSort==="payoff"?'<div class="hint" style="margin-top:6px">Avalanche order: highest APR first. Extra dollars go to #1, minimums on the rest.</div>':""}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin:0 0 10px">
+      <span class="hint">Sort by</span>
+      <select style="flex:1;max-width:230px" onchange="setDebtSort(this.value)">
+        <option value="payoff" ${debtSort==="payoff"?"selected":""}>Recommended payoff order</option>
+        <option value="name" ${debtSort==="name"?"selected":""}>Name</option>
+        <option value="amtHigh" ${debtSort==="amtHigh"?"selected":""}>Amount (highest first)</option>
+        <option value="amtLow" ${debtSort==="amtLow"?"selected":""}>Amount (lowest first)</option>
+        <option value="apr" ${debtSort==="apr"?"selected":""}>APR</option>
+        <option value="section" ${debtSort==="section"?"selected":""}>Section (cards / loans)</option>
+      </select>
+    </div>
+    ${rows}`;
+}
+
+function investTab(c){
+  if(!S.invest.length) return `<div class="empty">No investments yet.<br>Tap + to add accounts with balances and goals.</div>`;
+  const rows=S.invest.map(v=>{
+    const pct=v.goal?(v.amt/v.goal)*100:0;
+    return `<div class="card" style="padding:12px;margin-bottom:8px;cursor:pointer" onclick="openEdit('invest',${v.id})">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <div class="name">${esc(v.name)}${v.link?'<span class="lnk">⟲</span>':""}${v.apy>0?`<span class="b mono" style="font-size:11px;margin-left:6px">${v.apy}% APY</span>`:""}</div>
+        <div class="mono" style="font-size:14px;font-weight:600">${fmt(v.amt)}</div>
+      </div>
+      ${bar(pct,pct>=100?"var(--blue)":"var(--green)")}
+      <div class="hint mono" style="margin-top:5px">${pct<1?pct.toFixed(2):pct.toFixed(1)}% of ${fmtShort(v.goal)}</div>
+    </div>`;
+  }).join("");
+  return `<div class="mono d" style="font-size:13px;margin:6px 0 14px">Portfolio total: <span class="g" style="font-weight:700">${fmt(c.iTotal)}</span></div>${rows}`;
+}
+
+function accountsTab(c){
+  const cashRow=a=>`
+    <div class="row-item" style="justify-content:space-between" onclick="openEdit('cash',${a.id})">
+      <div>
+        <div class="name">${esc(a.name)}${a.last4?` <span class="mono d" style="font-size:11px">${a.l4type==="card"?"Card":"Acct"} ••${esc(a.last4)}</span>`:""}${a.link?'<span class="lnk">⟲</span>':""}</div>
+        ${a.tag?`<div style="font-size:11px" class="b">${esc(a.tag)}</div>`:""}
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        ${a.url?`<button class="btn ghost" style="padding:5px 9px;font-size:13px" onclick="openExt('${esc(a.url)}',event)">↗</button>`:""}
+        <div class="amt">${fmt(a.amt)}</div>
+      </div>
+    </div>`;
+  const checking=S.cash.filter(a=>!a.savings);
+  const savings=S.cash.filter(a=>a.savings);
+  const cashRows=`
+    ${checking.length?`<div class="sec">Checking &amp; spending · ${fmt(checking.reduce((s,a)=>s+a.amt,0))}</div>${checking.map(cashRow).join("")}`:""}
+    ${savings.length?`<div class="sec" style="color:var(--purple)">Savings · ${fmt(c.savingsTotal)}</div>${savings.map(cashRow).join("")}`:""}`;
+  const ccRows=S.credit.map(x=>{
+    const util=x.limit?(x.debt/x.limit)*100:0;
+    return `<div class="card" style="padding:12px;margin-bottom:8px;cursor:pointer" onclick="openEdit('credit',${x.id})">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <div class="name">${esc(x.name)}${x.last4?` <span class="mono d" style="font-size:11px">••${esc(x.last4)}</span>`:""}${x.link?'<span class="lnk">⟲</span>':""}<span class="mono ${x.apr>20?"r":"d"}" style="font-size:11px;margin-left:6px">${x.apr}% APR</span></div>
+        <div style="display:flex;align-items:center;gap:8px">${x.url?`<button class="btn ghost" style="padding:4px 8px;font-size:12px" onclick="openExt('${esc(x.url)}',event)">↗</button>`:""}<div class="mono" style="font-size:13px"><span class="${x.debt>0?"r":"g"}" style="font-weight:600">${fmt(x.debt)}</span><span class="d"> / ${fmtShort(x.limit)}</span></div></div>
+      </div>
+      ${bar(util,util>60?"var(--red)":util>30?"var(--amber)":"var(--green)")}
+      ${x.note?`<div class="hint" style="margin-top:5px">${esc(x.note)}</div>`:""}
+    </div>`;
+  }).join("");
+  const empty=!S.cash.length&&!S.credit.length;
+  if(empty) return `<div class="empty">No accounts yet.<br>Tap + for a cash account, or "+ Credit card".</div>`;
+  return `
+    ${S.cash.length?cashRows:""}
+    ${S.credit.length?`<div class="sec" style="margin-top:20px">Credit · ${fmt(c.ccDebt)} owed / ${fmtShort(c.ccLimit)} limit</div>${ccRows}`:""}`;
+}
+
+// ---------- main render ----------
+const TABS=[["budget","Budget"],["monthly","Monthly"],["annual","Annual"],["debt","Debt"],["invest","Investments"],["accounts","Accounts"]];
+function render(keepScroll){
+  const y=keepScroll?window.scrollY:null;
+  const c=calc();
+  let content="";
+  if(tab==="budget") content=budgetTab(c);
+  else if(tab==="monthly") content=monthlyTab(c);
+  else if(tab==="annual") content=annualTab(c);
+  else if(tab==="debt") content=debtTab(c);
+  else if(tab==="invest") content=investTab(c);
+  else content=accountsTab(c);
+  const fab=(tab!=="budget"&&tab!=="debt")?`<button class="fab" onclick="openEdit('${tab==="accounts"?"cash":tab}',null)">+</button>`:"";
+  const fab2=tab==="accounts"?`<button class="fab2" onclick="openEdit('credit',null)">+ Credit card</button>`:"";
+  const alertHtml=activeAlerts.length?`<div class="alertbox">⚠ ${activeAlerts.map(a=>esc(a.body)).join("<br>⚠ ")}</div>`:"";
+  document.getElementById("app").innerHTML=`
+    <div class="hdr">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div style="min-width:0">
+          <div style="font-size:17px;font-weight:700">${S.profile.nick?`Welcome back, ${esc(S.profile.nick)}`:"Welcome"}</div>
+          <div class="eyebrow" style="margin-top:2px">Ledger · ${new Date().toLocaleDateString("en-US",{month:"long",day:"numeric"})}</div>
+        </div>
+        <button class="pfp" onclick="openMenu()" aria-label="Profile">${pfpHTML(38)}</button>
+      </div>
+      <div class="stats" id="hdrStats">${hdrStatsHTML(c)}</div>
+    </div>
+    ${banner?`<div class="banner" onclick="dismissBanner()">${esc(banner)} · tap to dismiss</div>`:""}
+    ${alertHtml}
+    <div class="tabs">${TABS.map(([k,l])=>`<button class="tab ${tab===k?"on":""}" onclick="setTab('${k}')">${l}</button>`).join("")}</div>
+    <div class="wrap">${content}</div>
+    ${fab}${fab2}`;
+  applyTheme();
+  if(y!=null) window.scrollTo(0,y);
+}
+
+S=load(); persist();
+checkAlerts();
+render();
+setInterval(checkAlerts,30*60*1000);
+</script>
+</body>
+</html>

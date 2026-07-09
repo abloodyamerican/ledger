@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Deep slate financial app branding background -->
+    <path
+        android:fillColor="#121824"
+        android:pathData="M0,0 h108 v108 H0 Z" />
+        
+    <!-- Subtle geometric background grid/accent lines for a technical/trading feel -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="1"
+        android:pathData="M20,0 V108 M40,0 V108 M60,0 V108 M80,0 V108 M100,0 V108" />
+        
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="1"
+        android:pathData="M0,20 H108 M0,40 H108 M0,60 H108 M0,80 H108 M0,100 H108" />
+
+    <!-- Soft glowing gradient effect in the top right -->
+    <path
+        android:fillColor="#0A2239"
+        android:pathData="M54,0 C83.82,0 108,24.18 108,54 L108,0 Z" />
+</vector>
