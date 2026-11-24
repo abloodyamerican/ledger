@@ -3,32 +3,86 @@ package com.max.ledger;
 import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Matrix;
+import android.graphics.Rect;
+import android.graphics.pdf.PdfRenderer;
+import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.window.OnBackInvokedDispatcher;
+
+import androidx.core.content.FileProvider;
+
+import com.google.android.gms.tasks.Tasks;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
+    private static final int FILE_REQ = 42;        // <input type=file> (profile photo, restore file)
+    private static final int SAVE_REQ = 43;        // "Save to file" picker
+    private static final int SCAN_CAMERA_REQ = 44; // scan: take a photo
+    private static final int SCAN_FILE_REQ = 45;   // scan: photo or PDF from the device
+
+    /** Automatic backups go to Documents/Ledger (visible in My Files, kept after uninstall). */
+    static final String BACKUP_DIR = "Ledger";
+    static final int BACKUPS_KEPT = 8;
+    private static final int SCAN_MAX_EDGE = 2600; // px; plenty for OCR, keeps memory low
+    private static final int PDF_MAX_PAGES = 3;
+
     private WebView wv;
     private ValueCallback<Uri[]> fileCallback;
-    private static final int FILE_REQ = 42;
+    private String pendingSaveText;   // backup text waiting for the user to pick a place
+    private String cameraPath;        // temp photo for a camera scan
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null) cameraPath = savedInstanceState.getString("cameraPath");
 
         Notify.ensureChannel(this);
-
         if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                         != PackageManager.PERMISSION_GRANTED) {
@@ -39,22 +93,25 @@ public class MainActivity extends Activity {
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setAllowFileAccess(true);
+        s.setAllowFileAccess(false); // the app page is an asset; it never needs other files
         wv.setWebViewClient(new WebViewClient());
 
-        // WebChromeClient: enables JS alert/confirm dialogs (delete/reset confirmations)
-        // and the file picker for the profile photo.
+        // Alerts/confirms + the file picker for <input type=file> (photo, restore from file).
         wv.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                                              FileChooserParams params) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = callback;
+                boolean imagesOnly = true;
+                String[] types = params.getAcceptTypes();
+                if (types == null || types.length == 0) imagesOnly = false;
+                else for (String t : types) if (t == null || !t.startsWith("image/")) imagesOnly = false;
                 Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("image/*");
+                i.setType(imagesOnly ? "image/*" : "*/*");
                 try {
-                    startActivityForResult(Intent.createChooser(i, "Choose photo"), FILE_REQ);
+                    startActivityForResult(Intent.createChooser(i, imagesOnly ? "Choose photo" : "Choose file"), FILE_REQ);
                 } catch (Exception e) {
                     fileCallback = null;
                     return false;
@@ -63,7 +120,7 @@ public class MainActivity extends Activity {
             }
         });
 
-        wv.addJavascriptInterface(new Bridge(this), "Android");
+        wv.addJavascriptInterface(new Bridge(), "Android");
         wv.setBackgroundColor(0xFF0C0F14);
 
         // Keep content out from under the status bar / gesture bar (Android 15+ edge-to-edge)
@@ -75,25 +132,336 @@ public class MainActivity extends Activity {
         wv.loadUrl("file:///android_asset/ledger.html");
         setContentView(wv);
 
+        // Back closes the open sheet first. Android 13+ uses the new back callback
+        // (on Android 16, onBackPressed is no longer called at all).
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+        }
+
         scheduleDaily(this);
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        if (cameraPath != null) out.putString("cameraPath", cameraPath);
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public void onBackPressed() { handleBack(); }
+
+    private void handleBack() {
+        if (wv == null) { moveTaskToBack(true); return; }
+        wv.evaluateJavascript("(window.ledgerBack&&window.ledgerBack())?1:0", res -> {
+            if (!"1".equals(res)) moveTaskToBack(true); // nothing open: leave like Home
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        io.shutdown();
+        super.onDestroy();
     }
 
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
         super.onActivityResult(req, result, data);
-        if (req == FILE_REQ && fileCallback != null) {
-            Uri[] out = null;
-            if (result == RESULT_OK && data != null && data.getData() != null)
-                out = new Uri[]{ data.getData() };
-            fileCallback.onReceiveValue(out);
-            fileCallback = null;
+        if (req == FILE_REQ) {
+            if (fileCallback != null) {
+                Uri[] out = null;
+                if (result == RESULT_OK && data != null && data.getData() != null)
+                    out = new Uri[]{ data.getData() };
+                fileCallback.onReceiveValue(out);
+                fileCallback = null;
+            }
+        } else if (req == SAVE_REQ) {
+            final String text = pendingSaveText;
+            pendingSaveText = null;
+            if (result != RESULT_OK || data == null || data.getData() == null || text == null) {
+                js("window.ledgerBackupStatus&&window.ledgerBackupStatus(" + JSONObject.quote("Save cancelled") + ")");
+                return;
+            }
+            final Uri uri = data.getData();
+            io.execute(() -> {
+                String msg;
+                try (OutputStream os = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (os == null) throw new Exception("couldn't open the file");
+                    os.write(text.getBytes(StandardCharsets.UTF_8));
+                    msg = "✓ Backup saved";
+                } catch (Exception e) {
+                    msg = "✗ Couldn't save: " + e.getMessage();
+                }
+                js("window.ledgerBackupStatus&&window.ledgerBackupStatus(" + JSONObject.quote(msg) + ")");
+            });
+        } else if (req == SCAN_CAMERA_REQ) {
+            final String path = cameraPath;
+            cameraPath = null;
+            if (result != RESULT_OK || path == null || !new File(path).exists() || new File(path).length() == 0) {
+                if (path != null) new File(path).delete();
+                scanReply("{\"cancel\":true}");
+                return;
+            }
+            io.execute(() -> runScan(Uri.fromFile(new File(path)), false, new File(path)));
+        } else if (req == SCAN_FILE_REQ) {
+            if (result != RESULT_OK || data == null || data.getData() == null) {
+                scanReply("{\"cancel\":true}");
+                return;
+            }
+            final Uri uri = data.getData();
+            final String type = getContentResolver().getType(uri);
+            final boolean pdf = "application/pdf".equals(type)
+                    || uri.toString().toLowerCase().endsWith(".pdf");
+            io.execute(() -> runScan(uri, pdf, null));
         }
     }
 
-    @Override
-    public void onBackPressed() {
-        if (wv != null && wv.canGoBack()) wv.goBack();
-        else super.onBackPressed();
+    // ---------- helpers ----------
+    private void js(final String code) {
+        runOnUiThread(() -> { if (wv != null) wv.evaluateJavascript(code, null); });
+    }
+
+    private void scanReply(String json) {
+        // U+2028/2029 are legal in JSON but can break older JS parsers
+        String safe = json.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+        js("window.ledgerScanResult&&window.ledgerScanResult(" + safe + ")");
+    }
+
+    private static String errJson(String msg) {
+        try { return new JSONObject().put("error", msg).toString(); }
+        catch (Exception e) { return "{\"error\":\"scan failed\"}"; }
+    }
+
+    // ---------- scanning (ML Kit, on the phone, nothing uploaded) ----------
+    private void startScan(String source) {
+        try {
+            if ("camera".equals(source)) {
+                File dir = new File(getCacheDir(), "scan");
+                if (!dir.exists() && !dir.mkdirs()) throw new Exception("no space for the photo");
+                File f = new File(dir, "scan-" + System.currentTimeMillis() + ".jpg");
+                cameraPath = f.getAbsolutePath();
+                Uri out = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", f);
+                Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                i.putExtra(MediaStore.EXTRA_OUTPUT, out);
+                i.setClipData(ClipData.newRawUri("scan", out));
+                i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivityForResult(i, SCAN_CAMERA_REQ);
+            } else {
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "application/pdf"});
+                startActivityForResult(Intent.createChooser(i, "Choose a photo or PDF"), SCAN_FILE_REQ);
+            }
+        } catch (ActivityNotFoundException e) {
+            cameraPath = null;
+            scanReply(errJson("no camera app found"));
+        } catch (Exception e) {
+            cameraPath = null;
+            scanReply(errJson(String.valueOf(e.getMessage())));
+        }
+    }
+
+    /** Runs on the io thread. Reads the image or the first pages of a PDF, sends lines to JS. */
+    private void runScan(Uri uri, boolean pdf, File deleteAfter) {
+        TextRecognizer rec = null;
+        File pdfCopy = null;
+        try {
+            List<Bitmap> pages = new ArrayList<>();
+            if (pdf) {
+                pdfCopy = new File(getCacheDir(), "scan-" + System.currentTimeMillis() + ".pdf");
+                copy(uri, pdfCopy); // PdfRenderer needs a seekable file
+                try (ParcelFileDescriptor pfd = ParcelFileDescriptor.open(pdfCopy, ParcelFileDescriptor.MODE_READ_ONLY);
+                     PdfRenderer r = new PdfRenderer(pfd)) {
+                    int n = Math.min(PDF_MAX_PAGES, r.getPageCount());
+                    for (int p = 0; p < n; p++) {
+                        try (PdfRenderer.Page page = r.openPage(p)) {
+                            float scale = 2000f / Math.max(1, page.getWidth());
+                            int w = Math.round(page.getWidth() * scale), h = Math.round(page.getHeight() * scale);
+                            Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                            new Canvas(b).drawColor(Color.WHITE);
+                            page.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                            pages.add(b);
+                        }
+                    }
+                }
+            } else {
+                Bitmap b = decodeImage(uri);
+                if (b == null) throw new Exception("couldn't open that image");
+                pages.add(b);
+            }
+            if (pages.isEmpty()) throw new Exception("nothing to read");
+
+            rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+            JSONArray lines = new JSONArray();
+            int yOffset = 0;
+            for (Bitmap b : pages) {
+                Text text = Tasks.await(rec.process(InputImage.fromBitmap(b, 0)));
+                for (Text.TextBlock block : text.getTextBlocks()) {
+                    for (Text.Line line : block.getLines()) {
+                        Rect r = line.getBoundingBox();
+                        if (r == null) continue;
+                        lines.put(new JSONObject()
+                                .put("t", line.getText())
+                                .put("x0", r.left).put("y0", r.top + yOffset)
+                                .put("x1", r.right).put("y1", r.bottom + yOffset));
+                    }
+                }
+                yOffset += b.getHeight() + 200; // keep pages apart so rows never merge
+                b.recycle();
+            }
+            scanReply(new JSONObject().put("lines", lines).toString());
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            if (e instanceof OutOfMemoryError) m = "the image is too large";
+            scanReply(errJson(m == null ? "scan failed" : m));
+        } finally {
+            if (rec != null) rec.close();
+            if (pdfCopy != null) pdfCopy.delete();
+            if (deleteAfter != null) deleteAfter.delete(); // the photo isn't kept
+        }
+    }
+
+    private void copy(Uri from, File to) throws Exception {
+        try (InputStream in = getContentResolver().openInputStream(from);
+             OutputStream out = new FileOutputStream(to)) {
+            if (in == null) throw new Exception("couldn't open the file");
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+    }
+
+    /** Decodes a photo at a sensible size and turns it upright using its EXIF orientation. */
+    private Bitmap decodeImage(Uri uri) throws Exception {
+        ContentResolver cr = getContentResolver();
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        try (InputStream in = cr.openInputStream(uri)) { BitmapFactory.decodeStream(in, null, bounds); }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+        int sample = 1;
+        while (Math.max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= SCAN_MAX_EDGE) sample *= 2;
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inSampleSize = sample;
+        Bitmap b;
+        try (InputStream in = cr.openInputStream(uri)) { b = BitmapFactory.decodeStream(in, null, o); }
+        if (b == null) return null;
+
+        int rotate = 0;
+        try (InputStream in = cr.openInputStream(uri)) {
+            if (in != null) {
+                int or = new ExifInterface(in).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                if (or == ExifInterface.ORIENTATION_ROTATE_90) rotate = 90;
+                else if (or == ExifInterface.ORIENTATION_ROTATE_180) rotate = 180;
+                else if (or == ExifInterface.ORIENTATION_ROTATE_270) rotate = 270;
+            }
+        } catch (Exception ignored) {}
+
+        float scale = Math.min(1f, (float) SCAN_MAX_EDGE / Math.max(b.getWidth(), b.getHeight()));
+        if (rotate != 0 || scale < 1f) {
+            Matrix m = new Matrix();
+            m.postScale(scale, scale);
+            m.postRotate(rotate);
+            Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+            if (r != b) b.recycle();
+            b = r;
+        }
+        return b;
+    }
+
+    // ---------- automatic backups in Documents/Ledger ----------
+    private static boolean validBackupName(String name) {
+        return name != null && name.matches("[A-Za-z0-9._ ()-]{1,100}\\.json");
+    }
+
+    private static final class BackupFile {
+        final String name; final long size; final Uri uri; final File file;
+        BackupFile(String n, long s, Uri u, File f) { name = n; size = s; uri = u; file = f; }
+    }
+
+    /** Backups this app wrote, newest first. */
+    private List<BackupFile> listAutoBackups() {
+        List<BackupFile> out = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= 29) {
+            Uri col = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+            String[] proj = {MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE};
+            String sel = MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ? AND " + MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?";
+            String[] args = {Environment.DIRECTORY_DOCUMENTS + "/" + BACKUP_DIR + "%", "ledger-%.json"};
+            try (Cursor c = getContentResolver().query(col, proj, sel, args, null)) {
+                if (c != null) while (c.moveToNext()) {
+                    long id = c.getLong(0);
+                    out.add(new BackupFile(c.getString(1), c.getLong(2),
+                            android.content.ContentUris.withAppendedId(col, id), null));
+                }
+            } catch (Exception ignored) {}
+        } else {
+            File dir = legacyDir();
+            File[] fs = dir.listFiles();
+            if (fs != null) for (File f : fs)
+                if (f.getName().startsWith("ledger-") && f.getName().endsWith(".json"))
+                    out.add(new BackupFile(f.getName(), f.length(), null, f));
+        }
+        // names start with ledger-auto-YYYY-MM-DD_HHMM, so name order is time order
+        Collections.sort(out, (a, b) -> b.name.compareTo(a.name));
+        return out;
+    }
+
+    private File legacyDir() {
+        File d = new File(getExternalFilesDir(null), BACKUP_DIR);
+        if (!d.exists()) d.mkdirs();
+        return d;
+    }
+
+    private void writeAutoBackup(String name, String text) throws Exception {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentResolver cr = getContentResolver();
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/" + BACKUP_DIR + "/");
+            v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = cr.insert(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), v);
+            if (uri == null) throw new Exception("couldn't create the file");
+            try (OutputStream os = cr.openOutputStream(uri, "w")) {
+                if (os == null) throw new Exception("couldn't open the file");
+                os.write(bytes);
+            } catch (Exception e) {
+                cr.delete(uri, null, null);
+                throw e;
+            }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            cr.update(uri, done, null, null);
+        } else {
+            try (OutputStream os = new FileOutputStream(new File(legacyDir(), name))) { os.write(bytes); }
+        }
+        // keep the newest few
+        List<BackupFile> all = listAutoBackups();
+        for (int i = BACKUPS_KEPT; i < all.size(); i++) {
+            BackupFile f = all.get(i);
+            try {
+                if (f.uri != null) getContentResolver().delete(f.uri, null, null);
+                else if (f.file != null) f.file.delete();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private String readAutoBackup(String name) throws Exception {
+        for (BackupFile f : listAutoBackups()) {
+            if (!f.name.equals(name)) continue;
+            try (InputStream in = f.uri != null ? getContentResolver().openInputStream(f.uri)
+                    : new java.io.FileInputStream(f.file)) {
+                if (in == null) return "";
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                return new String(bo.toByteArray(), StandardCharsets.UTF_8);
+            }
+        }
+        return "";
     }
 
     public static void scheduleDaily(Context ctx) {
@@ -110,30 +478,86 @@ public class MainActivity extends Activity {
                 cal.getTimeInMillis(), AlarmManager.INTERVAL_DAY, pi);
     }
 
-    public static class Bridge {
-        private final Context ctx;
-        Bridge(Context c) { ctx = c; }
+    /** Everything the HTML app can call as window.Android.* */
+    public class Bridge {
 
         @JavascriptInterface
         public void notify(String title, String body) {
-            Notify.post(ctx, title, body, (title + body).hashCode());
+            Notify.post(MainActivity.this, title, body, (title + body).hashCode());
         }
 
         @JavascriptInterface
         public void setSchedule(String json) {
-            ctx.getSharedPreferences("ledger", Context.MODE_PRIVATE)
-               .edit().putString("schedule", json).apply();
+            getSharedPreferences("ledger", Context.MODE_PRIVATE)
+                    .edit().putString("schedule", json).apply();
         }
 
-        /** Open a URL — Android resolves it to the matching app if installed
-         *  (bank/broker apps often claim their own links), otherwise the browser. */
+        /** Open a web, mail or phone link. Bank/broker apps that claim their https links open directly. */
         @JavascriptInterface
         public void openUrl(String url) {
             try {
-                Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                Uri u = Uri.parse(url);
+                String sch = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+                if (!(sch.equals("https") || sch.equals("http") || sch.equals("mailto") || sch.equals("tel"))) return;
+                Intent i = new Intent(Intent.ACTION_VIEW, u);
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                ctx.startActivity(i);
+                startActivity(i);
             } catch (Exception ignored) {}
+        }
+
+        /** "Save to file": asks where to save, then writes the text there. */
+        @JavascriptInterface
+        public void saveBackup(final String name, final String text) {
+            runOnUiThread(() -> {
+                pendingSaveText = text;
+                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("application/json");
+                i.putExtra(Intent.EXTRA_TITLE, name);
+                try {
+                    startActivityForResult(i, SAVE_REQ);
+                } catch (Exception e) {
+                    pendingSaveText = null;
+                    js("window.ledgerBackupStatus&&window.ledgerBackupStatus(" + JSONObject.quote("✗ No file picker available") + ")");
+                }
+            });
+        }
+
+        /** Writes a backup to Documents/Ledger without asking, keeping the newest 8. */
+        @JavascriptInterface
+        public void autoBackup(final String name, final String text) {
+            if (!validBackupName(name) || text == null) return;
+            io.execute(() -> {
+                try {
+                    writeAutoBackup(name, text);
+                    js("window.ledgerAutoBackupStatus&&window.ledgerAutoBackupStatus(true,'')");
+                } catch (Exception e) {
+                    js("window.ledgerAutoBackupStatus&&window.ledgerAutoBackupStatus(false," + JSONObject.quote(String.valueOf(e.getMessage())) + ")");
+                }
+            });
+        }
+
+        /** JSON list of automatic backups, newest first: [{name,size}] */
+        @JavascriptInterface
+        public String listBackups() {
+            JSONArray a = new JSONArray();
+            try {
+                for (BackupFile f : listAutoBackups())
+                    a.put(new JSONObject().put("name", f.name).put("size", f.size));
+            } catch (Exception ignored) {}
+            return a.toString();
+        }
+
+        @JavascriptInterface
+        public String readBackup(String name) {
+            if (!validBackupName(name)) return "";
+            try { return readAutoBackup(name); } catch (Exception e) { return ""; }
+        }
+
+        /** Scan a paystub or receipt: source is "camera" or "file". Answers via window.ledgerScanResult. */
+        @JavascriptInterface
+        public void scanDocument(final String source) {
+            runOnUiThread(() -> startScan(source));
         }
     }
 }

@@ -39,6 +39,8 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
+    // on-phone text reading for paystub / receipt scans (works offline, nothing uploaded)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)

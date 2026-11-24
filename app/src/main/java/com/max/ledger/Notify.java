@@ -36,7 +36,16 @@ public class Notify {
          .setStyle(new Notification.BigTextStyle().bigText(body))
          .setSmallIcon(android.R.drawable.stat_notify_more)
          .setContentIntent(pi)
-         .setAutoCancel(true);
+         .setAutoCancel(true)
+         // amounts stay hidden on the lock screen until the phone is unlocked
+         .setVisibility(Notification.VISIBILITY_PRIVATE);
+
+        Notification.Builder pub = Build.VERSION.SDK_INT >= 26
+                ? new Notification.Builder(ctx, CHANNEL) : new Notification.Builder(ctx);
+        pub.setContentTitle("Ledger")
+           .setContentText("You have a money reminder")
+           .setSmallIcon(android.R.drawable.stat_notify_more);
+        b.setPublicVersion(pub.build());
 
         NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
         nm.notify(id, b.build());
