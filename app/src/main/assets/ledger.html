@@ -184,7 +184,12 @@ function migrate(d){
   if(d.viewMonthOffset===undefined) d.viewMonthOffset=0;
   cleanCarries(d);
   const mk=monthKeyNow();
-  if(d.monthKey && d.monthKey!==mk){
+  // "Start next month" tapped early already began this month's cycle, so the calendar
+  // catching up must not reset it again (that wiped bills paid and spending logged since)
+  const startedEarly=!!d.cycleKey&&d.cycleKey>=mk;
+  if(d.monthKey && d.monthKey!==mk && startedEarly){
+    d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===mk);
+  } else if(d.monthKey && d.monthKey!==mk){
     d.monthly=d.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
     // last month's auto-added annual bills don't carry into the new month
     d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===mk);
@@ -192,6 +197,7 @@ function migrate(d){
     banner="New month — bills unchecked, spending budgets reset"+(carried?", overspending carried over":"");
   }
   d.monthKey=mk;
+  if(d.cycleKey&&!(d.cycleKey>mk)) delete d.cycleKey;  // calendar has caught up with the cycle
   return d;
 }
 // An annual bill whose due date lands in the current month gets mirrored into the
@@ -692,7 +698,10 @@ function advanceMonth(){
   S.monthly=S.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
   // auto-added annual bills from the old month don't carry forward
   S.monthly=S.monthly.filter(b=>!b.fromAnnual);
-  carryRollover(S,monthKeyNow());
+  // the cycle being closed, and the month the new one stands for
+  const closing=S.cycleKey||monthKeyNow();
+  carryRollover(S,closing);
+  { const [y,m]=closing.split("-").map(Number); const n=new Date(y,m,1); S.cycleKey=n.getFullYear()+"-"+String(n.getMonth()+1).padStart(2,"0"); }
   S.viewMonthOffset=0;  // the new cycle becomes the working "current" view
   persist(); syncAnnualToMonthly(); render();
   banner="Started next month — bills unchecked, spending reset. Undo from the profile menu if that was a mistake.";
