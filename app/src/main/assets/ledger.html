@@ -80,6 +80,8 @@
   .menu{background:var(--panel);border:1px solid var(--line);border-radius:14px;width:min(320px,88vw);padding:8px;margin:auto}
   .menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font-family:var(--sans);font-size:15px;font-weight:600;padding:13px 12px;border-bottom:1px solid var(--line)}
   .menu button:last-child{border-bottom:none}
+  .menu button.cbtn{display:block;text-align:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--dim);font-size:13px;padding:9px 6px}
+  .menu button.cbtn.on{background:rgba(111,168,255,.15);border-color:var(--blue);color:var(--blue)}
   .overlay.center{align-items:center;justify-content:center}
   .stubtbl{width:100%;font-size:12px}
   .stubtbl .trow{display:flex;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)}
@@ -112,6 +114,7 @@ const SEED = {
   credit: [],
   log: [],
   notified: {},
+  carryAsk: [],
 };
 
 // ---------- helpers ----------
@@ -179,15 +182,14 @@ function migrate(d){
   if(d.healthYear===undefined) d.healthYear=0;
   if(!d.healthLog) d.healthLog=[];
   if(d.viewMonthOffset===undefined) d.viewMonthOffset=0;
+  cleanCarries(d);
   const mk=monthKeyNow();
   if(d.monthKey && d.monthKey!==mk){
     d.monthly=d.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
     // last month's auto-added annual bills don't carry into the new month
     d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===mk);
-    d.misc=d.misc.map(m=>({...m,spent:0}));
-    d.health=(d.health||[]).map(m=>({...m,spent:0}));
-    d.transport=(d.transport||[]).map(m=>({...m,spent:0}));
-    banner="New month — bills unchecked, spending budgets reset";
+    const carried=carryRollover(d,d.monthKey);
+    banner="New month — bills unchecked, spending budgets reset"+(carried?", overspending carried over":"");
   }
   d.monthKey=mk;
   return d;
@@ -690,13 +692,206 @@ function advanceMonth(){
   S.monthly=S.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
   // auto-added annual bills from the old month don't carry forward
   S.monthly=S.monthly.filter(b=>!b.fromAnnual);
-  S.misc=S.misc.map(m=>({...m,spent:0}));
-  S.health=(S.health||[]).map(m=>({...m,spent:0}));
-  S.transport=(S.transport||[]).map(m=>({...m,spent:0}));
+  carryRollover(S,monthKeyNow());
   S.viewMonthOffset=0;  // the new cycle becomes the working "current" view
   persist(); syncAnnualToMonthly(); render();
   banner="Started next month — bills unchecked, spending reset. Undo from the profile menu if that was a mistake.";
   render();
+  openCarryAsk();
+}
+
+// ---------- overspend carryover ----------
+// When a month ends, any spending category that went over budget carries the overage
+// into the coming month(s). Underspending never carries. Each overage is a "carry" on
+// the category: {id, from, amt, left, n, cur}. amt is the original overage, left is what
+// hasn't been charged yet, n is how many more months it will be charged, and cur is the
+// part charged to the current month. The current month's charges are already counted in
+// the category's spent, so every budget, bar and alert sees them with no extra code.
+// Rolling = the whole overage lands on next month (and whatever is still over then
+// carries again at the next rollover). Spreading over N months = overage / N per month.
+const CARRY_CATS=["misc","health","transport"];
+const CARRY_MAX=12;
+const c2=n=>Math.round((Number(n)||0)*100)/100;
+function cleanCarries(d){
+  CARRY_CATS.forEach(k=>{
+    d[k]=(Array.isArray(d[k])?d[k]:[]).map(m=>{
+      if(!Array.isArray(m.carries)){ if(m.carries===undefined) return m; return {...m,carries:[]}; }
+      const carries=m.carries.filter(isObj).map(c=>({id:c.id||Date.now()+Math.random(),from:typeof c.from==="string"?c.from:"",
+        amt:c2(c.amt),left:Math.max(0,c2(c.left)),n:Math.max(0,Math.min(CARRY_MAX,Math.round(Number(c.n)||0))),cur:Math.max(0,c2(c.cur))}));
+      return {...m,carries};
+    });
+  });
+  d.carryAsk=(Array.isArray(d.carryAsk)?d.carryAsk:[]).filter(isObj);
+}
+// One month's charge for a carry: the next even slice of what's still owed.
+function carryCharge(c){
+  if(c.n<=0||c.left<0.005){ c.cur=0; c.left=0; c.n=0; return 0; }
+  c.cur=c.n===1?c2(c.left):c2(c.left/c.n);
+  c.left=c2(c.left-c.cur); c.n--;
+  return c.cur;
+}
+const carryIn=m=>c2((m.carries||[]).reduce((s,c)=>s+(c.cur||0),0));
+const carryMonthName=key=>key?new Date(key+"-15T12:00").toLocaleDateString("en-US",{month:"long"}):"last month";
+// Close the month for every spending category. Returns how many went over.
+function carryRollover(d,fromKey){
+  const ask=[];
+  CARRY_CATS.forEach(k=>{
+    d[k]=(d[k]||[]).map(m=>{
+      // finished carries drop off; ones still being spread keep going
+      const carries=(m.carries||[]).filter(c=>c.n>0&&c.left>=0.005).map(c=>({...c}));
+      const over=c2((m.spent||0)-(m.budget||0));
+      if((m.budget||0)>0&&over>=0.01){
+        const c={id:Date.now()+Math.random(),from:fromKey||"",amt:over,left:over,n:1,cur:0};
+        carries.push(c);
+        ask.push({cat:k,id:m.id,cid:c.id});
+      }
+      carries.forEach(carryCharge);
+      return {...m,carries,spent:c2(carries.reduce((s,c)=>s+c.cur,0))};
+    });
+  });
+  d.carryAsk=ask;
+  return ask.length;
+}
+// Re-plan one carry starting with the current month: months=1 puts everything that's
+// left on this month (roll), months=N spreads it evenly over this month and the next N-1.
+function setCarryMonths(m,cid,months){
+  const c=(m.carries||[]).find(x=>x.id===cid); if(!c) return;
+  months=Math.max(1,Math.min(CARRY_MAX,Math.round(months)||1));
+  m.spent=c2((m.spent||0)-(c.cur||0));
+  c.left=c2(c.left+(c.cur||0)); c.cur=0; c.n=months;
+  carryCharge(c);
+  m.spent=c2(m.spent+c.cur);
+}
+const carryMonthsOf=c=>(c.n||0)+((c.cur||0)>0?1:0);  // months left, counting this one
+const carryLeftNow=c=>c2((c.left||0)+(c.cur||0));     // still owed, counting this month
+function carryPlanText(c,months){
+  const total=carryLeftNow(c);
+  if(months<=1) return `All ${fmt(total)} counts against this month.`;
+  const per=c2(total/months);
+  return `${fmt(per)} a month for ${months} months.`;
+}
+function findCarry(cat,id,cid){
+  const m=(S[cat]||[]).find(x=>x.id===id);
+  const c=m&&(m.carries||[]).find(x=>x.id===cid);
+  return c?{m,c}:null;
+}
+
+// The month-end pop-up: one row per category that went over.
+let carryUI=null;
+function openCarryAsk(){
+  const rows=(S.carryAsk||[]).map(a=>{ const f=findCarry(a.cat,a.id,a.cid); return f?{...a,months:carryMonthsOf(f.c),spread:carryMonthsOf(f.c)>1}:null; }).filter(Boolean);
+  if(!rows.length){ if((S.carryAsk||[]).length){ S.carryAsk=[]; quietSave=true; try{ persist(); }finally{ quietSave=false; } } return; }
+  carryUI={rows,all:false,allSpread:false,allMonths:3};
+  renderCarryAsk();
+}
+function renderCarryAsk(){
+  const u=carryUI; if(!u) return;
+  const many=u.rows.length>1;
+  const choice=(pfx,spread,months)=>`
+    <div style="display:flex;gap:8px;margin:8px 0">
+      <button class="cbtn ${spread?"":"on"}" style="flex:1" onclick="carryPick('${pfx}',false)">Roll to next month</button>
+      <button class="cbtn ${spread?"on":""}" style="flex:1" onclick="carryPick('${pfx}',true)">Spread it out</button>
+    </div>
+    ${spread?`<div style="display:flex;align-items:center;gap:10px">
+      <input type="range" min="2" max="${CARRY_MAX}" step="1" value="${Math.max(2,months)}" style="flex:1;padding:0;accent-color:var(--blue)" oninput="carrySlide('${pfx}',this.value)">
+      <span class="mono" style="min-width:64px;text-align:right" id="cm_${pfx}">${Math.max(2,months)} months</span>
+    </div>`:""}`;
+  const rowHTML=(r,i)=>{
+    const f=findCarry(r.cat,r.id,r.cid); if(!f) return "";
+    const spread=u.all?u.allSpread:r.spread, months=spread?(u.all?u.allMonths:r.months):1;
+    const amt=carryLeftNow(f.c);
+    return `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="font-weight:600;font-size:14px">${esc(f.m.name)}</span>
+        <span class="mono r" style="font-weight:600">${fmt(amt)} over</span>
+      </div>
+      <div class="hint">Budget ${fmt(f.m.budget)} · <span id="cp_${i}">${carryPlanText(f.c,Math.max(1,months))}</span></div>
+      ${u.all?"":choice(String(i),r.spread,r.months)}
+    </div>`;
+  };
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center">
+      <div class="menu" style="padding:16px;max-height:84vh;overflow-y:auto">
+        <div style="font-weight:700;font-size:15px;margin-bottom:6px">Over budget last month</div>
+        <div class="hint" style="margin-bottom:6px">${many?"These categories":"This category"} went over in ${esc(carryMonthName(u.rows[0]&&findCarry(u.rows[0].cat,u.rows[0].id,u.rows[0].cid)?findCarry(u.rows[0].cat,u.rows[0].id,u.rows[0].cid).c.from:""))}. Roll the overage into next month, or spread it out?</div>
+        ${many?`<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:8px 0">
+          <input type="checkbox" ${u.all?"checked":""} onchange="carryAll(this.checked)" style="width:18px;height:18px;accent-color:var(--blue)">
+          <span style="font-size:13px">Use the same choice for all</span></label>`:""}
+        ${u.all?choice("all",u.allSpread,u.allMonths):""}
+        ${u.rows.map(rowHTML).join("")}
+        <div class="hint" style="margin-top:10px">You can change this later by tapping the category.</div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+          <button class="cbtn on" style="width:auto;padding:9px 22px;font-weight:600" onclick="applyCarryAsk()">Apply</button>
+        </div>
+      </div>
+    </div>`;
+}
+function carryPick(pfx,spread){
+  const u=carryUI; if(!u) return;
+  if(pfx==="all"){ u.allSpread=spread; if(spread&&u.allMonths<2) u.allMonths=3; }
+  else { const r=u.rows[+pfx]; r.spread=spread; if(spread&&r.months<2) r.months=3; }
+  renderCarryAsk();
+}
+// slider drag: update the labels only, so the slider keeps your finger
+function carrySlide(pfx,v){
+  const u=carryUI; if(!u) return;
+  const n=Math.max(2,Math.min(CARRY_MAX,parseInt(v)||2));
+  const lbl=document.getElementById("cm_"+pfx); if(lbl) lbl.textContent=n+" months";
+  const upd=(r,i)=>{ const f=findCarry(r.cat,r.id,r.cid); const e=document.getElementById("cp_"+i); if(f&&e) e.textContent=carryPlanText(f.c,n); };
+  if(pfx==="all"){ u.allMonths=n; u.rows.forEach(upd); }
+  else { const i=+pfx; u.rows[i].months=n; upd(u.rows[i],i); }
+}
+function carryAll(on){
+  const u=carryUI; if(!u) return;
+  u.all=!!on;
+  if(on&&u.rows.length){ u.allSpread=u.rows[0].spread; u.allMonths=Math.max(2,u.rows[0].months); }
+  renderCarryAsk();
+}
+function applyCarryAsk(){
+  const u=carryUI; if(!u){ closeSheet(); return; }
+  checkpoint();
+  u.rows.forEach(r=>{
+    const f=findCarry(r.cat,r.id,r.cid); if(!f) return;
+    const spread=u.all?u.allSpread:r.spread;
+    const months=spread?(u.all?u.allMonths:r.months):1;
+    const m={...f.m,carries:(f.m.carries||[]).map(c=>({...c}))};
+    setCarryMonths(m,r.cid,months);
+    S[r.cat]=S[r.cat].map(x=>x.id===m.id?m:x);
+    if(months>1) addLog({name:m.name,action:`overage spread over ${months} months`,delta:0,cat:r.cat});
+  });
+  S.carryAsk=[]; carryUI=null;
+  persist(); closeSheet(); checkAlerts(); render();
+}
+
+// In the category's edit sheet: what's carried in, with a slider to re-plan it.
+function carrySheetHTML(){
+  const list=(F.carries||[]).filter(c=>(c.cur||0)>0||(c.n||0)>0);
+  if(!list.length) return "";
+  return `<div class="adj" style="width:100%;margin-top:4px">
+    <div class="lbl">Carried over</div>
+    ${list.map(c=>{ const months=carryMonthsOf(c);
+      return `<div style="margin-bottom:10px">
+        <div style="font-size:13px">${fmt(c.amt)} over from ${esc(carryMonthName(c.from))} · <b class="r">${fmt(c.cur||0)}</b> counted this month${c.left>0.004?` · ${fmt(c.left)} still to come`:""}</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+          <input type="range" min="1" max="${CARRY_MAX}" step="1" value="${months||1}" style="flex:1;padding:0;accent-color:var(--blue)"
+            oninput="carrySheetSlide(${c.id},this.value)" onchange="carrySheetSet(${c.id},this.value)">
+          <span class="mono" style="min-width:64px;text-align:right" id="csm_${String(c.id).replace(".","_")}">${months<=1?"Roll":months+" months"}</span>
+        </div>
+        <div class="hint" id="csp_${String(c.id).replace(".","_")}">${carryPlanText(c,months||1)} Slide to spread what's left from this month on.</div>
+      </div>`; }).join("")}
+  </div>`;
+}
+function carrySheetSlide(cid,v){
+  const c=(F.carries||[]).find(x=>x.id===cid); if(!c) return;
+  const n=Math.max(1,Math.min(CARRY_MAX,parseInt(v)||1)), k=String(cid).replace(".","_");
+  const a=document.getElementById("csm_"+k); if(a) a.textContent=n<=1?"Roll":n+" months";
+  const b=document.getElementById("csp_"+k); if(b) b.textContent=carryPlanText(c,n)+" Slide to spread what's left from this month on.";
+}
+function carrySheetSet(cid,v){
+  if(!F) return;
+  F={...F,carries:(F.carries||[]).map(c=>({...c}))};
+  setCarryMonths(F,cid,parseInt(v)||1);
+  renderSheet();
 }
 function resetApp(){
   if(!confirm("Wipe EVERYTHING and start fresh?")) return;
@@ -1495,11 +1690,13 @@ function renderSheet(){
     if(t==="misc"||t==="transport"){
       body+=fld("Monthly budget","f_budget","number",F.budget,`oninput="fSetNum('budget',this.value)"`);
       body+=fld("Spent so far","f_spent","number",F.spent,`oninput="fSetNum('spent',this.value)"`);
+      body+=carrySheetHTML();
       body+=acctPickerHTML();
     }
     if(t==="health"){
       body+=fld("Monthly budget","f_budget","number",F.budget,`oninput="fSetNum('budget',this.value)"`);
       body+=fld("Spent so far","f_spent","number",F.spent,`oninput="fSetNum('spent',this.value)"`);
+      body+=carrySheetHTML();
       body+=`<label class="fld" style="min-width:140px"><span>Category</span>
         <select onchange="fSet('cat',this.value)">
           <option value="medical" ${(F.cat||"medical")==="medical"?"selected":""}>Medical</option>
@@ -3260,7 +3457,7 @@ function budgetTab(c){
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span style="font-weight:600;font-size:13px">${esc(m.name)}${m.cat?` <span class="chip">${esc(titleCase(m.cat))}</span>`:""}${m.acct&&acctName(m.acct)?` <span class="chip b">${esc(acctName(m.acct))}</span>`:""}</span>
         <span class="mono ${pct>100?"r":"d"}" style="font-size:12px">${fmt(m.spent)} / ${fmt(m.budget)}</span>
-      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}</div>`;
+      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}${carryIn(m)>0?`<div class="hint" style="margin-top:3px">Includes ${fmt(carryIn(m))} carried from earlier overspending</div>`:""}</div>`;
   };
   const misc=S.misc.map(m=>catRow('misc',m)).join("");
   const health=(S.health||[]).map(m=>catRow('health',m)).join("");
@@ -3601,6 +3798,7 @@ function boot(){
   render();
   showSaveWarn();
   weeklyAutoBackup();
+  openCarryAsk();
   setInterval(checkAlerts,30*60*1000);
 }
 // If the saved data still can't be shown, don't white-screen: offer to save it and recover.
