@@ -20,6 +20,19 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // CI builds sign with the PC's debug key (from the DEBUG_KEYSTORE_B64 secret) so phone
+    // installs update the existing app. Local builds don't set this and keep Android Studio's key.
+    signingConfigs {
+        getByName("debug") {
+            System.getenv("LEDGER_DEBUG_KEYSTORE")?.takeIf { it.isNotBlank() }?.let {
+                storeFile = file(it)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             optimization {
