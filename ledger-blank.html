@@ -80,6 +80,8 @@
   .menu{background:var(--panel);border:1px solid var(--line);border-radius:14px;width:min(320px,88vw);padding:8px;margin:auto}
   .menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font-family:var(--sans);font-size:15px;font-weight:600;padding:13px 12px;border-bottom:1px solid var(--line)}
   .menu button:last-child{border-bottom:none}
+  .menu button.cbtn{display:block;text-align:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--dim);font-size:13px;padding:9px 6px}
+  .menu button.cbtn.on{background:rgba(111,168,255,.15);border-color:var(--blue);color:var(--blue)}
   .overlay.center{align-items:center;justify-content:center}
   .stubtbl{width:100%;font-size:12px}
   .stubtbl .trow{display:flex;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)}
@@ -112,6 +114,7 @@ const SEED = {
   credit: [],
   log: [],
   notified: {},
+  carryAsk: [],
 };
 
 // ---------- helpers ----------
@@ -157,26 +160,36 @@ const VALUE_FIELD = { monthly:"debt", credit:"debt", cash:"amt", invest:"amt" };
 // ---------- state ----------
 let S, tab="budget", editing=null, F=null, banner="", backupStatus="", activeAlerts=[];
 
+const isObj=x=>!!x&&typeof x==="object"&&!Array.isArray(x);
+const LIST_KEYS=Object.keys(SEED).filter(k=>Array.isArray(SEED[k]));
 function migrate(d){
   const base=JSON.parse(JSON.stringify(SEED));
+  if(!isObj(d)) d={};
   d={...base,...d};
-  d.settings={...base.settings,...(d.settings||{})};
-  d.profile={...base.profile,...(d.profile||{})};
-  d.jobs=(d.jobs||[]).map(j=>({rates:[],stubs:[],pct:0,freq:"biweekly",archived:false,title:"",type:"pt",payAnchor:"",labelRates:[],schedule:[],scheduleArchive:[],...j}));
+  // damaged data: anything that should be a list but isn't becomes an empty list,
+  // and junk entries inside lists are dropped, so render() can't crash on them
+  LIST_KEYS.forEach(k=>{ d[k]=!Array.isArray(d[k])?[]:k==="expenseNames"?d[k].filter(x=>typeof x==="string"):d[k].filter(isObj); });
+  d.settings={...base.settings,...(isObj(d.settings)?d.settings:{})};
+  d.profile={...base.profile,...(isObj(d.profile)?d.profile:{})};
+  if(!isObj(d.notified)) d.notified={};
+  if(d.scanMap!==undefined&&!isObj(d.scanMap)) d.scanMap={};
+  const arr=x=>Array.isArray(x)?x:[];
+  d.jobs=d.jobs.map(j=>{ const o={rates:[],stubs:[],pct:0,freq:"biweekly",archived:false,title:"",type:"pt",payAnchor:"",labelRates:[],schedule:[],scheduleArchive:[],...j};
+    ["rates","stubs","labelRates","schedule","scheduleArchive"].forEach(k=>{ o[k]=arr(o[k]).filter(isObj); });
+    return o; });
   if(!d.health) d.health=[];
   if(!d.transport) d.transport=[];
   if(d.healthYear===undefined) d.healthYear=0;
   if(!d.healthLog) d.healthLog=[];
   if(d.viewMonthOffset===undefined) d.viewMonthOffset=0;
+  cleanCarries(d);
   const mk=monthKeyNow();
   if(d.monthKey && d.monthKey!==mk){
     d.monthly=d.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
     // last month's auto-added annual bills don't carry into the new month
     d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===mk);
-    d.misc=d.misc.map(m=>({...m,spent:0}));
-    d.health=(d.health||[]).map(m=>({...m,spent:0}));
-    d.transport=(d.transport||[]).map(m=>({...m,spent:0}));
-    banner="New month — bills unchecked, spending budgets reset";
+    const carried=carryRollover(d,d.monthKey);
+    banner="New month — bills unchecked, spending budgets reset"+(carried?", overspending carried over":"");
   }
   d.monthKey=mk;
   return d;
@@ -199,48 +212,120 @@ function syncAnnualToMonthly(){
   });
   if(added){ persist(); banner=`${added} annual bill${added>1?"s":""} added to this month's bills`; }
 }
+// ---------- load / save ----------
+// load() never throws and never overwrites unreadable data: a save that can't be read is
+// copied to a "-corrupt-<time>" key first, and if even that fails, saving is blocked so the
+// original stays untouched until a backup is restored.
+let loadProblem="", saveBlocked=false, saveFailed=false, monthCloseRaw=null;
+function seedCopy(){ return JSON.parse(JSON.stringify(SEED)); }
 function load(){
-  let d;
-  try{ const r=localStorage.getItem(KEY); d = r ? JSON.parse(r) : JSON.parse(JSON.stringify(SEED)); }
-  catch(e){ d=JSON.parse(JSON.stringify(SEED)); }
-  return migrate(d);
+  let raw=null;
+  try{ raw=localStorage.getItem(KEY); }
+  catch(e){ saveBlocked=true; loadProblem="Ledger couldn't open its storage, so nothing will be saved this session. Restart the app; if it keeps happening, restore a backup."; return migrate(seedCopy()); }
+  if(!raw) return migrate(seedCopy());
+  try{
+    const d=JSON.parse(raw);
+    if(!isObj(d)) throw new Error("not a Ledger save");
+    if(d.monthKey&&d.monthKey!==monthKeyNow()) monthCloseRaw=raw;  // backed up before the new month resets it
+    return migrate(d);
+  }catch(e){
+    try{
+      localStorage.setItem(KEY+"-corrupt-"+Date.now(),raw);
+      loadProblem="Your saved data couldn't be read, so Ledger started empty. The unreadable copy is kept safe. Restore your latest backup from Settings → Backup & restore.";
+    }catch(e2){
+      saveBlocked=true;
+      loadProblem="Your saved data couldn't be read, and there's no room to set it aside, so Ledger won't save over it. Restore a backup from Settings → Backup & restore.";
+    }
+    return migrate(seedCopy());
+  }
 }
-function persist(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){} }
 // ---------- undo / redo ----------
-// Snapshot stacks hold JSON of S from BEFORE each user action. checkpoint() is
-// called at the start of a mutating action; undo pops back, redo re-applies.
-let undoStack=[], redoStack=[];
-const UNDO_MAX=40;
+// Every saved change is undoable. persist() compares the new state with the last saved
+// one and, when it changed, pushes the previous state onto the undo stack. A tap or a
+// committed field starts a new undo step; typing in the same field joins one step.
+let undoStack=[], redoStack=[], lastSaved=null, newStep=true, lastChangeAt=0, quietSave=false;
+const UNDO_MAX=40, STEP_GAP=4000;
 function stripTransient(obj){ const c={...obj}; delete c.__undo; return c; }
-function checkpoint(){
-  try{ undoStack.push(JSON.stringify(stripTransient(S))); if(undoStack.length>UNDO_MAX) undoStack.shift(); redoStack=[]; }catch(e){}
+// what counts as "your data" for undo: not the rebalance bar, alert bookkeeping or the month being viewed
+function undoKey(o){ const c={...o}; delete c.__undo; delete c.notified; delete c.viewMonthOffset; return JSON.stringify(c); }
+function checkpoint(){ newStep=true; }
+function trackUndo(cur){
+  if(quietSave||lastSaved===null||cur===lastSaved){ return; }
+  const now=Date.now();
+  if(newStep||!undoStack.length||now-lastChangeAt>STEP_GAP){
+    undoStack.push(lastSaved); if(undoStack.length>UNDO_MAX) undoStack.shift();
+  }
+  redoStack=[]; newStep=false; lastChangeAt=now;
+}
+function persist(){
+  const cur=undoKey(S);
+  trackUndo(cur);
+  // the rebalance Undo/Keep bar only lasts until you change something else
+  if(S.__undo){ if(S.__undo.after==null) S.__undo.after=cur; else if(S.__undo.after!==cur) delete S.__undo; }
+  lastSaved=cur;
+  if(saveBlocked){ showSaveWarn(); return false; }
+  try{ localStorage.setItem(KEY, JSON.stringify(S)); saveFailed=false; }
+  catch(e){ saveFailed=true; }
+  showSaveWarn();
+  return !saveFailed;
+}
+function showSaveWarn(){
+  let el=document.getElementById("saveWarn");
+  const msg=saveFailed?"NOT SAVED — your last change couldn't be stored (storage full or blocked). Save a backup file now.":
+    (saveBlocked||loadProblem)?loadProblem:"";
+  if(!msg){ if(el) el.remove(); return; }
+  if(!el){ el=document.createElement("div"); el.id="saveWarn"; document.body.insertBefore(el,document.body.firstChild); }
+  el.className="banner"; el.style.cssText="position:sticky;top:0;z-index:60;margin:0;border-radius:0;border-color:var(--red);color:var(--red);background:var(--panel)";
+  el.innerHTML=`<div style="font-weight:700">${esc(msg)}</div><div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+    <button class="btn" style="width:auto;padding:5px 12px;font-size:12px" onclick="doSaveFile()">Save backup file</button>
+    <button class="btn ghost" style="width:auto;padding:5px 12px;font-size:12px" onclick="openBackup()">Restore…</button>
+    ${(!saveFailed&&!saveBlocked)?`<button class="btn ghost" style="width:auto;padding:5px 12px;font-size:12px" onclick="loadProblem='';showSaveWarn()">Dismiss</button>`:""}</div>`;
 }
 function canUndo(){ return undoStack.length>0; }
 function canRedo(){ return redoStack.length>0; }
+// swap in a saved state without recording it as a new change
+function applySnapshot(json){
+  const keep={notified:S.notified,viewMonthOffset:S.viewMonthOffset};
+  S=migrate({...JSON.parse(json),...keep});
+  quietSave=true; try{ persist(); } finally{ quietSave=false; }
+  newStep=true;
+}
 function doUndo(){
   if(!undoStack.length) return;
   try{
-    redoStack.push(JSON.stringify(stripTransient(S)));
     const prev=undoStack.pop();
-    S=migrate(JSON.parse(prev));
-    persist(); checkAlerts(); render();
-    banner="Undone"; render();
+    redoStack.push(undoKey(S));
+    applySnapshot(prev);
+    checkAlerts(); banner="Undone"; render();
   }catch(e){ alert("Couldn't undo."); }
 }
 function doRedo(){
   if(!redoStack.length) return;
   try{
-    undoStack.push(JSON.stringify(stripTransient(S)));
     const next=redoStack.pop();
-    S=migrate(JSON.parse(next));
-    persist(); checkAlerts(); render();
-    banner="Redone"; render();
+    undoStack.push(undoKey(S));
+    applySnapshot(next);
+    checkAlerts(); banner="Redone"; render();
   }catch(e){ alert("Couldn't redo."); }
+}
+// a tap or a finished field edit starts a new undo step
+if(typeof document!=="undefined"&&document.addEventListener){
+  document.addEventListener("click",()=>{ newStep=true; },true);
+  document.addEventListener("change",()=>{ newStep=true; },true);
 }
 function addLog(e){ S.log=[{id:Date.now()+Math.random(),ts:Date.now(),...e},...(S.log||[])].slice(0,200); }
 function propagateLink(link,value){
   if(!link) return;
+  value=Math.round(Number(value||0)*100)/100;  // no 17.999999999 balances
   ["monthly","credit","cash","invest"].forEach(k=>{ S[k]=S[k].map(x=>x.link===link?{...x,[VALUE_FIELD[k]]:value}:x); });
+}
+// current balance of a link group, ignoring one record (the one being saved)
+function linkGroupValue(link,exceptId){
+  for(const k of ["credit","cash","invest","monthly"]){
+    const m=(S[k]||[]).find(x=>x.link===link&&x.id!==exceptId);
+    if(m) return Number(m[VALUE_FIELD[k]]||0);
+  }
+  return null;
 }
 
 // ---------- calc ----------
@@ -601,26 +686,222 @@ function monthLabelFor(offset){
   return d.toLocaleDateString("en-US",{month:"long",year:"numeric"});
 }
 function advanceMonth(){
+  autoBackup("month-close");
   checkpoint();
   S.monthly=S.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
   // auto-added annual bills from the old month don't carry forward
   S.monthly=S.monthly.filter(b=>!b.fromAnnual);
-  S.misc=S.misc.map(m=>({...m,spent:0}));
-  S.health=(S.health||[]).map(m=>({...m,spent:0}));
-  S.transport=(S.transport||[]).map(m=>({...m,spent:0}));
+  carryRollover(S,monthKeyNow());
   S.viewMonthOffset=0;  // the new cycle becomes the working "current" view
   persist(); syncAnnualToMonthly(); render();
   banner="Started next month — bills unchecked, spending reset. Undo from the profile menu if that was a mistake.";
   render();
+  openCarryAsk();
+}
+
+// ---------- overspend carryover ----------
+// When a month ends, any spending category that went over budget carries the overage
+// into the coming month(s). Underspending never carries. Each overage is a "carry" on
+// the category: {id, from, amt, left, n, cur}. amt is the original overage, left is what
+// hasn't been charged yet, n is how many more months it will be charged, and cur is the
+// part charged to the current month. The current month's charges are already counted in
+// the category's spent, so every budget, bar and alert sees them with no extra code.
+// Rolling = the whole overage lands on next month (and whatever is still over then
+// carries again at the next rollover). Spreading over N months = overage / N per month.
+const CARRY_CATS=["misc","health","transport"];
+const CARRY_MAX=12;
+const c2=n=>Math.round((Number(n)||0)*100)/100;
+function cleanCarries(d){
+  CARRY_CATS.forEach(k=>{
+    d[k]=(Array.isArray(d[k])?d[k]:[]).map(m=>{
+      if(!Array.isArray(m.carries)){ if(m.carries===undefined) return m; return {...m,carries:[]}; }
+      const carries=m.carries.filter(isObj).map(c=>({id:c.id||Date.now()+Math.random(),from:typeof c.from==="string"?c.from:"",
+        amt:c2(c.amt),left:Math.max(0,c2(c.left)),n:Math.max(0,Math.min(CARRY_MAX,Math.round(Number(c.n)||0))),cur:Math.max(0,c2(c.cur))}));
+      return {...m,carries};
+    });
+  });
+  d.carryAsk=(Array.isArray(d.carryAsk)?d.carryAsk:[]).filter(isObj);
+}
+// One month's charge for a carry: the next even slice of what's still owed.
+function carryCharge(c){
+  if(c.n<=0||c.left<0.005){ c.cur=0; c.left=0; c.n=0; return 0; }
+  c.cur=c.n===1?c2(c.left):c2(c.left/c.n);
+  c.left=c2(c.left-c.cur); c.n--;
+  return c.cur;
+}
+const carryIn=m=>c2((m.carries||[]).reduce((s,c)=>s+(c.cur||0),0));
+const carryMonthName=key=>key?new Date(key+"-15T12:00").toLocaleDateString("en-US",{month:"long"}):"last month";
+// Close the month for every spending category. Returns how many went over.
+function carryRollover(d,fromKey){
+  const ask=[];
+  CARRY_CATS.forEach(k=>{
+    d[k]=(d[k]||[]).map(m=>{
+      // finished carries drop off; ones still being spread keep going
+      const carries=(m.carries||[]).filter(c=>c.n>0&&c.left>=0.005).map(c=>({...c}));
+      const over=c2((m.spent||0)-(m.budget||0));
+      if((m.budget||0)>0&&over>=0.01){
+        const c={id:Date.now()+Math.random(),from:fromKey||"",amt:over,left:over,n:1,cur:0};
+        carries.push(c);
+        ask.push({cat:k,id:m.id,cid:c.id});
+      }
+      carries.forEach(carryCharge);
+      return {...m,carries,spent:c2(carries.reduce((s,c)=>s+c.cur,0))};
+    });
+  });
+  d.carryAsk=ask;
+  return ask.length;
+}
+// Re-plan one carry starting with the current month: months=1 puts everything that's
+// left on this month (roll), months=N spreads it evenly over this month and the next N-1.
+function setCarryMonths(m,cid,months){
+  const c=(m.carries||[]).find(x=>x.id===cid); if(!c) return;
+  months=Math.max(1,Math.min(CARRY_MAX,Math.round(months)||1));
+  m.spent=c2((m.spent||0)-(c.cur||0));
+  c.left=c2(c.left+(c.cur||0)); c.cur=0; c.n=months;
+  carryCharge(c);
+  m.spent=c2(m.spent+c.cur);
+}
+const carryMonthsOf=c=>(c.n||0)+((c.cur||0)>0?1:0);  // months left, counting this one
+const carryLeftNow=c=>c2((c.left||0)+(c.cur||0));     // still owed, counting this month
+function carryPlanText(c,months){
+  const total=carryLeftNow(c);
+  if(months<=1) return `All ${fmt(total)} counts against this month.`;
+  const per=c2(total/months);
+  return `${fmt(per)} a month for ${months} months.`;
+}
+function findCarry(cat,id,cid){
+  const m=(S[cat]||[]).find(x=>x.id===id);
+  const c=m&&(m.carries||[]).find(x=>x.id===cid);
+  return c?{m,c}:null;
+}
+
+// The month-end pop-up: one row per category that went over.
+let carryUI=null;
+function openCarryAsk(){
+  const rows=(S.carryAsk||[]).map(a=>{ const f=findCarry(a.cat,a.id,a.cid); return f?{...a,months:carryMonthsOf(f.c),spread:carryMonthsOf(f.c)>1}:null; }).filter(Boolean);
+  if(!rows.length){ if((S.carryAsk||[]).length){ S.carryAsk=[]; quietSave=true; try{ persist(); }finally{ quietSave=false; } } return; }
+  carryUI={rows,all:false,allSpread:false,allMonths:3};
+  renderCarryAsk();
+}
+function renderCarryAsk(){
+  const u=carryUI; if(!u) return;
+  const many=u.rows.length>1;
+  const choice=(pfx,spread,months)=>`
+    <div style="display:flex;gap:8px;margin:8px 0">
+      <button class="cbtn ${spread?"":"on"}" style="flex:1" onclick="carryPick('${pfx}',false)">Roll to next month</button>
+      <button class="cbtn ${spread?"on":""}" style="flex:1" onclick="carryPick('${pfx}',true)">Spread it out</button>
+    </div>
+    ${spread?`<div style="display:flex;align-items:center;gap:10px">
+      <input type="range" min="2" max="${CARRY_MAX}" step="1" value="${Math.max(2,months)}" style="flex:1;padding:0;accent-color:var(--blue)" oninput="carrySlide('${pfx}',this.value)">
+      <span class="mono" style="min-width:64px;text-align:right" id="cm_${pfx}">${Math.max(2,months)} months</span>
+    </div>`:""}`;
+  const rowHTML=(r,i)=>{
+    const f=findCarry(r.cat,r.id,r.cid); if(!f) return "";
+    const spread=u.all?u.allSpread:r.spread, months=spread?(u.all?u.allMonths:r.months):1;
+    const amt=carryLeftNow(f.c);
+    return `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="font-weight:600;font-size:14px">${esc(f.m.name)}</span>
+        <span class="mono r" style="font-weight:600">${fmt(amt)} over</span>
+      </div>
+      <div class="hint">Budget ${fmt(f.m.budget)} · <span id="cp_${i}">${carryPlanText(f.c,Math.max(1,months))}</span></div>
+      ${u.all?"":choice(String(i),r.spread,r.months)}
+    </div>`;
+  };
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center">
+      <div class="menu" style="padding:16px;max-height:84vh;overflow-y:auto">
+        <div style="font-weight:700;font-size:15px;margin-bottom:6px">Over budget last month</div>
+        <div class="hint" style="margin-bottom:6px">${many?"These categories":"This category"} went over in ${esc(carryMonthName(u.rows[0]&&findCarry(u.rows[0].cat,u.rows[0].id,u.rows[0].cid)?findCarry(u.rows[0].cat,u.rows[0].id,u.rows[0].cid).c.from:""))}. Roll the overage into next month, or spread it out?</div>
+        ${many?`<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:8px 0">
+          <input type="checkbox" ${u.all?"checked":""} onchange="carryAll(this.checked)" style="width:18px;height:18px;accent-color:var(--blue)">
+          <span style="font-size:13px">Use the same choice for all</span></label>`:""}
+        ${u.all?choice("all",u.allSpread,u.allMonths):""}
+        ${u.rows.map(rowHTML).join("")}
+        <div class="hint" style="margin-top:10px">You can change this later by tapping the category.</div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+          <button class="cbtn on" style="width:auto;padding:9px 22px;font-weight:600" onclick="applyCarryAsk()">Apply</button>
+        </div>
+      </div>
+    </div>`;
+}
+function carryPick(pfx,spread){
+  const u=carryUI; if(!u) return;
+  if(pfx==="all"){ u.allSpread=spread; if(spread&&u.allMonths<2) u.allMonths=3; }
+  else { const r=u.rows[+pfx]; r.spread=spread; if(spread&&r.months<2) r.months=3; }
+  renderCarryAsk();
+}
+// slider drag: update the labels only, so the slider keeps your finger
+function carrySlide(pfx,v){
+  const u=carryUI; if(!u) return;
+  const n=Math.max(2,Math.min(CARRY_MAX,parseInt(v)||2));
+  const lbl=document.getElementById("cm_"+pfx); if(lbl) lbl.textContent=n+" months";
+  const upd=(r,i)=>{ const f=findCarry(r.cat,r.id,r.cid); const e=document.getElementById("cp_"+i); if(f&&e) e.textContent=carryPlanText(f.c,n); };
+  if(pfx==="all"){ u.allMonths=n; u.rows.forEach(upd); }
+  else { const i=+pfx; u.rows[i].months=n; upd(u.rows[i],i); }
+}
+function carryAll(on){
+  const u=carryUI; if(!u) return;
+  u.all=!!on;
+  if(on&&u.rows.length){ u.allSpread=u.rows[0].spread; u.allMonths=Math.max(2,u.rows[0].months); }
+  renderCarryAsk();
+}
+function applyCarryAsk(){
+  const u=carryUI; if(!u){ closeSheet(); return; }
+  checkpoint();
+  u.rows.forEach(r=>{
+    const f=findCarry(r.cat,r.id,r.cid); if(!f) return;
+    const spread=u.all?u.allSpread:r.spread;
+    const months=spread?(u.all?u.allMonths:r.months):1;
+    const m={...f.m,carries:(f.m.carries||[]).map(c=>({...c}))};
+    setCarryMonths(m,r.cid,months);
+    S[r.cat]=S[r.cat].map(x=>x.id===m.id?m:x);
+    if(months>1) addLog({name:m.name,action:`overage spread over ${months} months`,delta:0,cat:r.cat});
+  });
+  S.carryAsk=[]; carryUI=null;
+  persist(); closeSheet(); checkAlerts(); render();
+}
+
+// In the category's edit sheet: what's carried in, with a slider to re-plan it.
+function carrySheetHTML(){
+  const list=(F.carries||[]).filter(c=>(c.cur||0)>0||(c.n||0)>0);
+  if(!list.length) return "";
+  return `<div class="adj" style="width:100%;margin-top:4px">
+    <div class="lbl">Carried over</div>
+    ${list.map(c=>{ const months=carryMonthsOf(c);
+      return `<div style="margin-bottom:10px">
+        <div style="font-size:13px">${fmt(c.amt)} over from ${esc(carryMonthName(c.from))} · <b class="r">${fmt(c.cur||0)}</b> counted this month${c.left>0.004?` · ${fmt(c.left)} still to come`:""}</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+          <input type="range" min="1" max="${CARRY_MAX}" step="1" value="${months||1}" style="flex:1;padding:0;accent-color:var(--blue)"
+            oninput="carrySheetSlide(${c.id},this.value)" onchange="carrySheetSet(${c.id},this.value)">
+          <span class="mono" style="min-width:64px;text-align:right" id="csm_${String(c.id).replace(".","_")}">${months<=1?"Roll":months+" months"}</span>
+        </div>
+        <div class="hint" id="csp_${String(c.id).replace(".","_")}">${carryPlanText(c,months||1)} Slide to spread what's left from this month on.</div>
+      </div>`; }).join("")}
+  </div>`;
+}
+function carrySheetSlide(cid,v){
+  const c=(F.carries||[]).find(x=>x.id===cid); if(!c) return;
+  const n=Math.max(1,Math.min(CARRY_MAX,parseInt(v)||1)), k=String(cid).replace(".","_");
+  const a=document.getElementById("csm_"+k); if(a) a.textContent=n<=1?"Roll":n+" months";
+  const b=document.getElementById("csp_"+k); if(b) b.textContent=carryPlanText(c,n)+" Slide to spread what's left from this month on.";
+}
+function carrySheetSet(cid,v){
+  if(!F) return;
+  F={...F,carries:(F.carries||[]).map(c=>({...c}))};
+  setCarryMonths(F,cid,parseInt(v)||1);
+  renderSheet();
 }
 function resetApp(){
   if(!confirm("Wipe EVERYTHING and start fresh?")) return;
   if(!confirm("Last chance — this cannot be undone.")) return;
+  autoBackup("before-reset");
+  checkpoint();
   localStorage.removeItem(KEY);
   S=migrate(JSON.parse(JSON.stringify(SEED))); banner="Fresh start"; tab="budget"; persist(); render();
 }
 function anchorChange(v){ S.payAnchor=v; persist(); render(); }
-function clearLog(){ if(confirm("Clear all history?")){ S.log=[]; persist(); render(); } }
+function clearLog(){ if(confirm("Clear all history?")){ checkpoint(); S.log=[]; persist(); render(); } }
 function softHdr(){ const h=document.getElementById("hdrStats"); if(h) h.innerHTML=hdrStatsHTML(calc()); }
 
 // ---------- jobs ----------
@@ -631,7 +912,7 @@ function addJob(){
 function addJobEdit(){ addJob(); const j=S.jobs[S.jobs.length-1]; openJobEdit(j.id); }
 function delJob(id){
   const j=S.jobs.find(x=>x.id===id);
-  if(confirm(`Delete "${j.name}" and its ${j.stubs.length} saved stub(s)?`)){ S.jobs=S.jobs.filter(x=>x.id!==id); persist(); render(); }
+  if(confirm(`Delete "${j.name}" and its ${j.stubs.length} saved stub(s)?`)){ checkpoint(); S.jobs=S.jobs.filter(x=>x.id!==id); persist(); render(); }
 }
 function jobField(id,k,v){ S.jobs=S.jobs.map(j=>j.id===id?{...j,[k]:k==="pct"?(parseFloat(v)||0):v}:j); persist(); if(k==="pct") softHdr(); }
 function jobEditDone(id){ S.jobs=S.jobs.map(j=>j.id!==id?j:{...j,name:titleCase(j.name),title:titleCase(j.title||"")}); persist(); closeSheet(); render(); }
@@ -793,6 +1074,7 @@ function saveStub(){
     gross:s.g,net:s.cur.net, // used by estimates
     pct:s.g?r2(((s.g-s.cur.net)/s.g)*100):0,
   };
+  checkpoint();
   j.stubs=[stub,...(j.stubs||[])];
   // learn saved options + percentages for future autofill (saved list = exactly this stub's rows)
   j.earningTypes=stub.earnings.map(e=>({name:e.name,jobTitle:e.jobTitle,rate:e.rate}));
@@ -805,6 +1087,7 @@ function saveStub(){
 }
 function delStub(jid,sid){
   if(!confirm("Delete this stub from history?")) return;
+  checkpoint();
   S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,stubs:j.stubs.filter(s=>s.id!==sid)});
   persist(); openHistory(jid);
 }
@@ -862,12 +1145,13 @@ function backupString(includePhoto){
   if(clone.profile&&clone.profile.photo){ clone.profile={...clone.profile,photo:""}; }
   return JSON.stringify(clone);
 }
-function doBackup(){ const ta=document.getElementById("bk"); ta.value=backupString(false); backupStatus="✓ Backup generated below (photo excluded to keep it small)"; render(true); }
+function doBackup(){ const ta=document.getElementById("bk"); if(!ta) return; ta.value=backupString(false); setBackupStatus("✓ Backup text below (photo left out to keep it small)"); }
 function doCopy(){
   const ta=document.getElementById("bk");
+  if(!ta) return;
   if(!ta.value) ta.value=backupString(false);
   const txt=ta.value;
-  const done=o=>{ backupStatus=o?"✓ Copied to clipboard":"Couldn't auto-copy — long-press the box to copy manually"; render(true); };
+  const done=o=>{ setBackupStatus(o?"✓ Copied to clipboard":"Couldn't auto-copy — long-press the box to copy manually"); };
   if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(()=>done(true)).catch(()=>{ ta.select(); done(document.execCommand("copy")); }); }
   else { ta.select(); done(document.execCommand("copy")); }
 }
@@ -879,27 +1163,120 @@ function doSaveFile(){
   try{
     if(window.Android&&window.Android.saveBackup){
       window.Android.saveBackup(name,txt);
-      backupStatus="Opening file picker — choose where to save "+name;
+      setBackupStatus("Choose where to save "+name);
     } else {
       // browser fallback: trigger a download
       const blob=new Blob([txt],{type:"application/json"});
       const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; a.click();
-      backupStatus="✓ Downloaded "+name;
+      setBackupStatus("✓ Downloaded "+name);
     }
-  }catch(e){ backupStatus="✗ Couldn't save file — use Copy instead"; }
-  render(true);
+  }catch(e){ setBackupStatus("✗ Couldn't save the file. Use Copy instead."); }
 }
 // Called from native code after a file save completes.
-window.ledgerBackupStatus=function(msg){ backupStatus=msg; try{render(true);}catch(e){} };
+window.ledgerBackupStatus=function(msg){ setBackupStatus(msg); };
+function setBackupStatus(msg){
+  backupStatus=msg;
+  const el=document.getElementById("bkStatus");
+  if(el){ el.textContent=msg; el.className=msg.startsWith("✗")?"r":"g"; el.style.display=msg?"":"none"; }
+}
+
+// ---- restore: validate, confirm, undoable ----
+function checkBackup(p){
+  if(!isObj(p)) return "That isn't a Ledger backup.";
+  const core=["monthly","cash","credit","jobs","misc","annual","invest"];
+  if(!core.some(k=>Array.isArray(p[k]))) return "That isn't a Ledger backup (no bills, accounts or jobs in it).";
+  for(const k of core) if(p[k]!=null&&!Array.isArray(p[k])) return `This backup looks damaged (its ${k} list is broken).`;
+  const keepBanner=banner;
+  try{ migrate(JSON.parse(JSON.stringify(p))); }catch(e){ banner=keepBanner; return "This backup looks damaged and can't be loaded."; }
+  banner=keepBanner;
+  return "";
+}
+function backupSummary(p){
+  const n=k=>Array.isArray(p[k])?p[k].length:0;
+  const stubs=(Array.isArray(p.jobs)?p.jobs:[]).reduce((t,j)=>t+(j&&Array.isArray(j.stubs)?j.stubs.length:0),0);
+  const parts=[`${n("monthly")} bills`,`${n("cash")+n("invest")} accounts`,`${n("credit")} cards`,`${n("jobs")} jobs`,`${stubs} paystubs`];
+  return parts.join(", ")+(p.monthKey?` · saved in ${p.monthKey}`:"");
+}
+function restoreFrom(text,source){
+  let p;
+  try{ p=JSON.parse(String(text||"").trim()); }
+  catch(e){ setBackupStatus("✗ Couldn't read that — it isn't backup text. Use a file from Save to file, or the exact text from Backup."); return false; }
+  const bad=checkBackup(p);
+  if(bad){ setBackupStatus("✗ "+bad); return false; }
+  if(!confirm(`Restore this backup${source?" ("+source+")":""}?\n\n${backupSummary(p)}\n\nIt replaces everything in Ledger now. You can undo it from the profile menu.`)) return false;
+  if(saveBlocked){
+    // the unreadable save is being replaced on purpose: keep a copy of it first
+    try{ const old=localStorage.getItem(KEY); if(old) autoBackup("unreadable",old); }catch(e){}
+    saveBlocked=false; loadProblem="";
+  } else autoBackup("before-restore");
+  checkpoint();
+  // keep the current photo if the backup left it out
+  if(isObj(p.profile)&&!p.profile.photo&&S.profile&&S.profile.photo) p.profile.photo=S.profile.photo;
+  S=migrate(p); persist();
+  syncAnnualToMonthly(); checkAlerts();
+  banner="Backup restored. Undo from the profile menu if it wasn't the right one.";
+  closeSheet(); render();
+  return true;
+}
 function doRestore(){
   const ta=document.getElementById("bk");
+  if(!ta) return;
+  if(restoreFrom(ta.value,"pasted text")) ta.value="";
+}
+function restoreFileChosen(inp){
+  const f=inp.files&&inp.files[0]; inp.value="";
+  if(!f) return;
+  if(f.size>20*1024*1024){ setBackupStatus("✗ That file is too big to be a Ledger backup."); return; }
+  const r=new FileReader();
+  r.onload=()=>restoreFrom(r.result,f.name);
+  r.onerror=()=>setBackupStatus("✗ Couldn't open that file.");
+  r.readAsText(f);
+}
+
+// ---- automatic backups ----
+// Written to Documents/Ledger on the phone (visible in My Files, survives uninstall),
+// on "Start next month", before a restore or reset, at the calendar month change and
+// once a week. The Android side keeps the newest 8.
+const AUTO_KEY=KEY+"-autoBackupAt";
+function hasAutoBackup(){ return !!(typeof window!=="undefined"&&window.Android&&typeof window.Android.autoBackup==="function"); }
+function lastAutoBackupAt(){ try{ return Number(localStorage.getItem(AUTO_KEY)||0); }catch(e){ return 0; } }
+function autoBackup(reason,raw){
+  if(!hasAutoBackup()) return false;
   try{
-    const p=JSON.parse(ta.value.trim());
-    if(!p.monthly||!p.cash) throw 0;
-    // preserve current photo if the restored backup omitted it
-    if(p.profile&&!p.profile.photo&&S.profile&&S.profile.photo) p.profile.photo=S.profile.photo;
-    S=migrate(p); persist(); backupStatus="✓ Data restored"; ta.value=""; render();
-  }catch(e){ backupStatus="✗ Invalid backup — paste the exact text from a previous Backup"; render(true); }
+    const d=new Date(), p=x=>String(x).padStart(2,"0");
+    const stamp=d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+"_"+p(d.getHours())+p(d.getMinutes());
+    const name="ledger-auto-"+stamp+"-"+reason+".json";
+    window.Android.autoBackup(name,raw||backupString(true));
+    try{ localStorage.setItem(AUTO_KEY,String(Date.now())); }catch(e){}
+    return true;
+  }catch(e){ return false; }
+}
+window.ledgerAutoBackupStatus=function(ok,msg){
+  if(!ok){ banner="Automatic backup failed: "+msg+". Save one from Settings → Backup & restore."; try{render(true);}catch(e){} }
+};
+function weeklyAutoBackup(){
+  if(Date.now()-lastAutoBackupAt()>7*24*3600*1000) autoBackup("weekly");
+}
+function autoBackupList(){
+  if(!(hasAutoBackup()&&typeof window.Android.listBackups==="function")) return [];
+  try{ const l=JSON.parse(window.Android.listBackups()||"[]"); return Array.isArray(l)?l:[]; }catch(e){ return []; }
+}
+function restoreAuto(i){
+  const item=autoBackupList()[i];
+  if(!item) return;
+  let txt="";
+  try{ txt=window.Android.readBackup(item.name)||""; }catch(e){}
+  if(!txt){ setBackupStatus("✗ Couldn't open "+item.name+"."); return; }
+  restoreFrom(txt,item.name);
+}
+function backupNow(){
+  if(autoBackup("manual")) setBackupStatus("✓ Saved to Documents/Ledger"); else doSaveFile();
+  if(document.getElementById("bkStatus")) openBackup();
+}
+function agoText(ts){
+  if(!ts) return "never";
+  const days=Math.floor((Date.now()-ts)/86400000);
+  return days<=0?"today":days===1?"yesterday":days+" days ago";
 }
 
 // ---------- edit sheet ----------
@@ -954,6 +1331,17 @@ function saveSheet(){
   const key=editing.tab;
   if(F.name!=null) F.name=titleCase(F.name);
   if(F.tag!=null&&F.tag!=="") F.tag=titleCase(F.tag);
+  // Linked records share one balance. Only push this record's balance to the group when you
+  // actually changed it here; otherwise it takes the group's balance (so adding "Visa payment"
+  // with debt left at 0 no longer wipes the card's real balance).
+  const vfLink=VALUE_FIELD[key];
+  let pushLink=false;
+  if(F.link&&vfLink){
+    const group=linkGroupValue(F.link,editing.item?editing.item.id:undefined);
+    const mine=Number(F[vfLink]||0);
+    const changedHere=editing.item?(Math.abs(mine-Number(editing.item[vfLink]||0))>0.001||editing.item.link!==F.link&&group===null):mine!==0;
+    if(group===null||changedHere) pushLink=true; else F[vfLink]=group;
+  }
   if(editing.item){
     S[key]=S[key].map(x=>x.id===F.id?F:x);
     const vf=(ADJ[key]||[])[0];
@@ -962,7 +1350,7 @@ function saveSheet(){
       if(Math.abs(after-before)>0.001) addLog({name:F.name,action:vf,delta:after-before,cat:key});
     }
   } else { F.id=Date.now(); S[key].push(F); addLog({name:F.name,action:"added",delta:0,cat:key}); }
-  if(F.link&&VALUE_FIELD[key]) propagateLink(F.link,F[VALUE_FIELD[key]]);
+  if(pushLink) propagateLink(F.link,F[vfLink]);
   // keep APR consistent across linked records
   if(F.link){
     if(Number(F.apr||0)>0){
@@ -1157,11 +1545,13 @@ function renderSheet(){
     if(t==="misc"||t==="transport"){
       body+=fld("Monthly budget","f_budget","number",F.budget,`oninput="fSetNum('budget',this.value)"`);
       body+=fld("Spent so far","f_spent","number",F.spent,`oninput="fSetNum('spent',this.value)"`);
+      body+=carrySheetHTML();
       body+=acctPickerHTML();
     }
     if(t==="health"){
       body+=fld("Monthly budget","f_budget","number",F.budget,`oninput="fSetNum('budget',this.value)"`);
       body+=fld("Spent so far","f_spent","number",F.spent,`oninput="fSetNum('spent',this.value)"`);
+      body+=carrySheetHTML();
       body+=`<label class="fld" style="min-width:140px"><span>Category</span>
         <select onchange="fSet('cat',this.value)">
           <option value="medical" ${(F.cat||"medical")==="medical"?"selected":""}>Medical</option>
@@ -1961,6 +2351,7 @@ function openRebalance(){
     </div>`;
 }
 function rebalanceApply(priority){
+  checkpoint();
   const clean={...S}; delete clean.__undo;
   const snapshot=JSON.stringify(clean);
   const c=calc();
@@ -2023,7 +2414,7 @@ function rebalanceApply(priority){
   } else {
     changes.push("Your budget already lines up with your minimum income — nothing worth changing.");
   }
-  S.__undo={snapshot,ts:Date.now(),changes};
+  S.__undo={snapshot,ts:Date.now(),changes,after:undoKey(S)};
   persist(); checkAlerts(); closeSheet(); render();
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
@@ -2041,7 +2432,8 @@ function rebalanceUndo(){
   try{
     const restored=JSON.parse(snap);
     delete restored.__undo;
-    S=migrate(restored);
+    checkpoint();
+    S=migrate({...restored,notified:S.notified,viewMonthOffset:S.viewMonthOffset});
     persist(); checkAlerts(); render();
     banner="Rebalance undone — your budget is back how it was";
     render();
@@ -2410,19 +2802,33 @@ function openNotifSettings(){
     </div>`;
 }
 function openBackup(){
+  const auto=hasAutoBackup(), list=autoBackupList();
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
-      <div class="menu" style="padding:16px">
+      <div class="menu" style="padding:16px;max-height:88vh;overflow-y:auto">
         <div style="font-weight:700;font-size:15px;margin-bottom:10px">Backup &amp; restore</div>
-        <div class="hint" style="margin-bottom:10px">Backup copies all your data as text — save it anywhere. Paste it back to restore, including into future versions. "Save to file" writes a .json you can store or share (no size limits).</div>
-        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-          <button class="btn" style="width:auto" onclick="doBackup()">Backup</button>
-          <button class="btn ghost" style="width:auto" onclick="doCopy()">Copy</button>
-          <button class="btn ghost" style="width:auto" onclick="doSaveFile()">Save to file</button>
-          <button class="btn ghost" style="width:auto" onclick="doRestore()">Restore</button>
-        </div>
-        ${backupStatus?`<div style="font-size:12px;font-weight:600;margin-bottom:8px" class="${backupStatus.startsWith("✗")?"r":"g"}">${backupStatus}</div>`:""}
-        <textarea id="bk" placeholder="Backup appears here / paste one here to restore" style="height:80px;font-size:10px;resize:vertical"></textarea>
+        ${auto?`<div class="hint" style="margin-bottom:8px">Automatic backups go to <b>Documents/Ledger</b> (My Files): weekly, on Start next month, at each new month and before a restore. The newest 8 are kept. Last one: <b>${agoText(lastAutoBackupAt())}</b>.</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button class="btn" style="width:auto" onclick="backupNow()">Back up now</button>
+          <button class="btn ghost" style="width:auto" onclick="doSaveFile()">Save a copy elsewhere…</button>
+        </div>`:`<div class="hint" style="margin-bottom:10px">Save a backup file now and then. Automatic backups need the Android app.</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button class="btn" style="width:auto" onclick="doSaveFile()">Save to file</button>
+        </div>`}
+        <div id="bkStatus" style="font-size:12px;font-weight:600;margin-bottom:8px;${backupStatus?"":"display:none"}" class="${backupStatus.startsWith("✗")?"r":"g"}">${esc(backupStatus)}</div>
+        <div style="font-weight:700;font-size:13px;margin:6px 0">Restore</div>
+        <div class="hint" style="margin-bottom:8px">Shows what's in the backup and asks first. You can undo a restore from the profile menu.</div>
+        ${list.length?`<div class="hint" style="margin-bottom:4px">Automatic backups:</div>
+          ${list.map((x,i)=>`<button style="display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="restoreAuto(${i})"><span style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(x.name.replace(/^ledger-auto-/,"").replace(/\.json$/,""))}</span><span class="b" style="font-size:11px">Restore</span></button>`).join("")}`:""}
+        <label class="btn ghost" style="width:auto;display:inline-block;margin:8px 0;cursor:pointer">Restore from a file…<input type="file" accept=".json,application/json,text/plain" style="display:none" onchange="restoreFileChosen(this)"></label>
+        <details style="margin-top:6px"><summary class="hint">Copy or paste backup text</summary>
+          <div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">
+            <button class="btn ghost" style="width:auto" onclick="doBackup()">Show backup text</button>
+            <button class="btn ghost" style="width:auto" onclick="doCopy()">Copy</button>
+            <button class="btn ghost" style="width:auto" onclick="doRestore()">Restore pasted text</button>
+          </div>
+          <textarea id="bk" placeholder="Backup text appears here / paste one here to restore" style="height:80px;font-size:10px;resize:vertical"></textarea>
+        </details>
         <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn ghost" style="width:auto" onclick="openSettings()">← Back</button><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
       </div>
     </div>`;
@@ -2546,7 +2952,7 @@ function photoPick(inp){
   };
   rd.readAsDataURL(f);
 }
-function saveProfile(){ S.profile={...P}; persist(); closeSheet(); render(); }
+function saveProfile(){ checkpoint(); S.profile={...P}; persist(); closeSheet(); render(); }
 
 // ---- pay stubs page ----
 let stubSelJob=null, stubSelId=null;
@@ -2586,6 +2992,7 @@ function renderStubsPage(){
 }
 function delStubFromPage(jid,sid){
   if(!confirm("Delete this stub from history?")) return;
+  checkpoint();
   S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,stubs:j.stubs.filter(s=>s.id!==sid)});
   stubSelId=null; persist(); openStubsPage(); render(true);
 }
@@ -2904,7 +3311,7 @@ function budgetTab(c){
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span style="font-weight:600;font-size:13px">${esc(m.name)}${m.cat?` <span class="chip">${esc(titleCase(m.cat))}</span>`:""}${m.acct&&acctName(m.acct)?` <span class="chip b">${esc(acctName(m.acct))}</span>`:""}</span>
         <span class="mono ${pct>100?"r":"d"}" style="font-size:12px">${fmt(m.spent)} / ${fmt(m.budget)}</span>
-      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}</div>`;
+      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}${carryIn(m)>0?`<div class="hint" style="margin-top:3px">Includes ${fmt(carryIn(m))} carried from earlier overspending</div>`:""}</div>`;
   };
   const misc=S.misc.map(m=>catRow('misc',m)).join("");
   const health=(S.health||[]).map(m=>catRow('health',m)).join("");
@@ -3217,18 +3624,50 @@ function render(keepScroll){
   if(y!=null) window.scrollTo(0,y);
 }
 
+// Called by MainActivity on Back. Returns true when it closed something.
+window.ledgerBack=function(){
+  try{
+    if(scanCtx&&scanCtx.waiting){ scanCtx.waiting=false; scanBack(); return true; }
+    const host=document.getElementById("sheetHost");
+    if(host&&host.innerHTML.trim()){
+      if(editing&&editing.tab==="stub") tryCloseSheet(); else closeSheet();
+      return true;
+    }
+  }catch(e){}
+  return false;
+};
 document.addEventListener("focusin",e=>{
   if(e.target&&/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)){
     setTimeout(()=>{ try{ e.target.scrollIntoView({block:"center",behavior:"smooth"}); }catch(_){}}, 250);
   }
 });
-S=load(); persist();
-S.viewMonthOffset=0;  // always open on the real current month; month nav is view-only
-archiveExpiredSchedules();
-syncAnnualToMonthly();
-checkAlerts();
-render();
-setInterval(checkAlerts,30*60*1000);
+function boot(){
+  S=load();
+  S.viewMonthOffset=0;  // always open on the real current month; month nav is view-only
+  // the month just changed on the calendar: keep the closing month's data first
+  if(monthCloseRaw){ autoBackup("month-close",monthCloseRaw); monthCloseRaw=null; }
+  // start-up housekeeping isn't something you'd want to undo
+  quietSave=true;
+  try{ persist(); archiveExpiredSchedules(); syncAnnualToMonthly(); checkAlerts(); } finally{ quietSave=false; }
+  render();
+  showSaveWarn();
+  weeklyAutoBackup();
+  openCarryAsk();
+  setInterval(checkAlerts,30*60*1000);
+}
+// If the saved data still can't be shown, don't white-screen: offer to save it and recover.
+function bootFailed(err){
+  let raw=""; try{ raw=localStorage.getItem(KEY)||""; }catch(e){}
+  saveBlocked=true;  // never overwrite the data we couldn't show
+  document.getElementById("app").innerHTML=`<div class="wrap" style="padding:16px">
+    <div class="banner" style="border-color:var(--red);color:var(--red)"><b>Ledger hit a problem showing your data.</b> Nothing has been changed or saved over.</div>
+    <div class="hint" style="margin:10px 0">Save your data to a file first, then try restoring an earlier backup. Error: ${esc(err&&err.message||String(err))}</div>
+    <button class="btn" onclick="(window.Android&&window.Android.saveBackup)?window.Android.saveBackup('ledger-rescue.json',document.getElementById('rawData').value):0">Save my data to a file</button>
+    <button class="btn ghost" style="margin-top:8px" onclick="openBackup()">Restore a backup…</button>
+    <textarea id="rawData" readonly style="margin-top:10px;height:120px;font-size:10px">${esc(raw)}</textarea>
+  </div>`;
+}
+try{ boot(); }catch(e){ try{ bootFailed(e); }catch(_){} }
 </script>
 </body>
 </html>
