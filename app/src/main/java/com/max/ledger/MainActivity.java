@@ -64,6 +64,8 @@ public class MainActivity extends Activity {
     private static final int SAVE_REQ = 43;        // "Save to file" picker
     private static final int SCAN_CAMERA_REQ = 44; // scan: take a photo
     private static final int SCAN_FILE_REQ = 45;   // scan: photo or PDF from the device
+    private static final int SNAP_MD_REQ = 46;     // budget snapshot: where the Markdown file goes
+    private static final int SNAP_JSON_REQ = 47;   // budget snapshot: where the JSON file goes
 
     /** Automatic backups go to Documents/Ledger (visible in My Files, kept after uninstall). */
     static final String BACKUP_DIR = "Ledger";
@@ -75,12 +77,17 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private String pendingSaveText;   // backup text waiting for the user to pick a place
     private String cameraPath;        // temp photo for a camera scan
+    private Uri pendingSnapMd;        // Markdown file picked, waiting for the JSON pick
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (savedInstanceState != null) cameraPath = savedInstanceState.getString("cameraPath");
+        if (savedInstanceState != null) {
+            cameraPath = savedInstanceState.getString("cameraPath");
+            String pm = savedInstanceState.getString("pendingSnapMd");
+            if (pm != null) pendingSnapMd = Uri.parse(pm);
+        }
 
         Notify.ensureChannel(this);
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -146,6 +153,7 @@ public class MainActivity extends Activity {
     protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         if (cameraPath != null) out.putString("cameraPath", cameraPath);
+        if (pendingSnapMd != null) out.putString("pendingSnapMd", pendingSnapMd.toString());
     }
 
     @SuppressWarnings("deprecation")
@@ -195,6 +203,35 @@ public class MainActivity extends Activity {
                 }
                 js("window.ledgerBackupStatus&&window.ledgerBackupStatus(" + JSONObject.quote(msg) + ")");
             });
+        } else if (req == SNAP_MD_REQ) {
+            if (result != RESULT_OK || data == null || data.getData() == null) {
+                snapStatus(false, "Cancelled. Nothing changed.");
+                return;
+            }
+            Uri md = data.getData();
+            keepAccess(md, data.getFlags());
+            pendingSnapMd = md;
+            // second pick: the picker opens in the same folder, so it's usually one tap
+            snapPick(SNAP_JSON_REQ, "application/json", "ledger-budget.json");
+        } else if (req == SNAP_JSON_REQ) {
+            Uri md = pendingSnapMd;
+            pendingSnapMd = null;
+            if (result != RESULT_OK || data == null || data.getData() == null || md == null) {
+                if (md != null) dropAccess(md);
+                snapStatus(false, "Cancelled. Nothing changed.");
+                return;
+            }
+            Uri json = data.getData();
+            keepAccess(json, data.getFlags());
+            Uri oldMd = snapUri("snapMd"), oldJson = snapUri("snapJson");
+            snapPrefs().edit()
+                    .putString("snapMd", md.toString()).putString("snapMdName", displayName(md, "ledger-budget.md"))
+                    .putString("snapJson", json.toString()).putString("snapJsonName", displayName(json, "ledger-budget.json"))
+                    .apply();
+            if (oldMd != null && !oldMd.equals(md)) dropAccess(oldMd);
+            if (oldJson != null && !oldJson.equals(json)) dropAccess(oldJson);
+            // the page writes the first snapshot right away
+            js("window.ledgerSnapshotPicked&&window.ledgerSnapshotPicked()");
         } else if (req == SCAN_CAMERA_REQ) {
             final String path = cameraPath;
             cameraPath = null;
@@ -368,6 +405,77 @@ public class MainActivity extends Activity {
             b = r;
         }
         return b;
+    }
+
+    // ---------- budget snapshot (Markdown + JSON, e.g. in a Google Drive folder) ----------
+    // Uses Android's own file picker (Storage Access Framework). Google Drive shows up there,
+    // so no Google sign-in or API keys are needed: Max picks the two files once, the app keeps
+    // permission to them, and every save overwrites both in place.
+    private android.content.SharedPreferences snapPrefs() {
+        return getSharedPreferences("ledger", Context.MODE_PRIVATE);
+    }
+
+    private Uri snapUri(String key) {
+        String u = snapPrefs().getString(key, null);
+        return u == null ? null : Uri.parse(u);
+    }
+
+    private void snapPick(int req, String mime, String name) {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType(mime);
+        i.putExtra(Intent.EXTRA_TITLE, name);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(i, req);
+        } catch (Exception e) {
+            if (pendingSnapMd != null) { dropAccess(pendingSnapMd); pendingSnapMd = null; }
+            snapStatus(false, "No file picker available on this phone.");
+        }
+    }
+
+    /** Keeps write access after the app restarts. Drive and local storage both allow it. */
+    private void keepAccess(Uri uri, int flags) {
+        try {
+            int f = flags & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            if (f == 0) f = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+            getContentResolver().takePersistableUriPermission(uri, f);
+        } catch (Exception ignored) {
+            // provider doesn't offer lasting access; writes still work until the app closes
+        }
+    }
+
+    private void dropAccess(Uri uri) {
+        try {
+            getContentResolver().releasePersistableUriPermission(uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        } catch (Exception ignored) {}
+    }
+
+    private String displayName(Uri uri, String fallback) {
+        try (Cursor c = getContentResolver().query(uri,
+                new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getString(0) != null) return c.getString(0);
+        } catch (Exception ignored) {}
+        return fallback;
+    }
+
+    /** Replaces the whole file. "wt" truncates; never plain "w", which can leave old text at the end. */
+    private void overwrite(Uri uri, String text) throws Exception {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        OutputStream os;
+        try {
+            os = getContentResolver().openOutputStream(uri, "wt");
+        } catch (IllegalArgumentException | java.io.FileNotFoundException modeRefused) {
+            os = getContentResolver().openOutputStream(uri, "rwt");
+        }
+        if (os == null) throw new Exception("couldn't open the file");
+        try (OutputStream o = os) { o.write(bytes); }
+    }
+
+    private void snapStatus(boolean ok, String msg) {
+        js("window.ledgerSnapshotStatus&&window.ledgerSnapshotStatus(" + ok + "," + JSONObject.quote(msg) + ")");
     }
 
     // ---------- automatic backups in Documents/Ledger ----------
@@ -552,6 +660,52 @@ public class MainActivity extends Activity {
         public String readBackup(String name) {
             if (!validBackupName(name)) return "";
             try { return readAutoBackup(name); } catch (Exception e) { return ""; }
+        }
+
+        /** Budget snapshot: pick (or re-pick) the Markdown and JSON files, e.g. in a Drive folder. */
+        @JavascriptInterface
+        public void snapshotPick() {
+            runOnUiThread(() -> snapPick(SNAP_MD_REQ, "text/markdown", "ledger-budget.md"));
+        }
+
+        /** {"on":bool,"md":name,"json":name} */
+        @JavascriptInterface
+        public String snapshotInfo() {
+            try {
+                android.content.SharedPreferences p = snapPrefs();
+                boolean on = p.getString("snapMd", null) != null && p.getString("snapJson", null) != null;
+                return new JSONObject().put("on", on)
+                        .put("md", p.getString("snapMdName", "")).put("json", p.getString("snapJsonName", ""))
+                        .toString();
+            } catch (Exception e) { return "{\"on\":false}"; }
+        }
+
+        /** Overwrites both snapshot files. Answers via window.ledgerSnapshotStatus(ok, message). */
+        @JavascriptInterface
+        public void snapshotWrite(final String md, final String json) {
+            final Uri mdUri = snapUri("snapMd"), jsonUri = snapUri("snapJson");
+            if (mdUri == null || jsonUri == null || md == null || json == null) return;
+            io.execute(() -> {
+                try {
+                    overwrite(mdUri, md);
+                    overwrite(jsonUri, json);
+                    snapStatus(true, "");
+                } catch (SecurityException e) {
+                    snapStatus(false, "Ledger lost access to the snapshot files. Choose where to save them again.");
+                } catch (Exception e) {
+                    snapStatus(false, "Couldn't update the snapshot: " + e.getMessage());
+                }
+            });
+        }
+
+        /** Stops writing snapshots. The files already written stay where they are. */
+        @JavascriptInterface
+        public void snapshotOff() {
+            Uri md = snapUri("snapMd"), json = snapUri("snapJson");
+            if (md != null) dropAccess(md);
+            if (json != null) dropAccess(json);
+            snapPrefs().edit().remove("snapMd").remove("snapMdName")
+                    .remove("snapJson").remove("snapJsonName").apply();
         }
 
         /** Scan a paystub or receipt: source is "camera" or "file". Answers via window.ledgerScanResult. */

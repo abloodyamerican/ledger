@@ -265,6 +265,7 @@ function persist(){
   try{ localStorage.setItem(KEY, JSON.stringify(S)); saveFailed=false; }
   catch(e){ saveFailed=true; }
   showSaveWarn();
+  if(!saveFailed) scheduleSnapshot();
   return !saveFailed;
 }
 function showSaveWarn(){
@@ -1082,6 +1083,150 @@ function agoText(ts){
   if(!ts) return "never";
   const days=Math.floor((Date.now()-ts)/86400000);
   return days<=0?"today":days===1?"yesterday":days+" days ago";
+}
+
+// ---- budget snapshot (Markdown for Obsidian + JSON for Hermes) ----
+// After each save, Ledger overwrites two files you picked once (e.g. in a Google Drive
+// folder). Budget data only: balances, categories (amount, spent, left) and when it was
+// updated. No account or card numbers, links, notes or paystubs go in it.
+const SNAP_KEY=KEY+"-snapshot";       // {at, key, err}
+const SNAP_DELAY=3000;                // wait for typing to settle before writing
+const SNAP_GROUPS=[["misc","Misc"],["health","Health"],["transport","Transportation"]];
+let snapTimer=null, snapPendingKey="";
+function hasSnapshot(){ return !!(typeof window!=="undefined"&&window.Android&&typeof window.Android.snapshotWrite==="function"); }
+function snapInfo(){
+  if(!hasSnapshot()||typeof window.Android.snapshotInfo!=="function") return {on:false};
+  try{ const o=JSON.parse(window.Android.snapshotInfo()||"{}"); return isObj(o)?o:{on:false}; }catch(e){ return {on:false}; }
+}
+function snapMeta(){ try{ const o=JSON.parse(localStorage.getItem(SNAP_KEY)||"{}"); return isObj(o)?o:{}; }catch(e){ return {}; } }
+function setSnapMeta(m){ try{ localStorage.setItem(SNAP_KEY,JSON.stringify({...snapMeta(),...m})); }catch(e){} }
+const snapR=n=>Math.round(Number(n||0)*100)/100;
+// local time with its UTC offset, e.g. 2026-11-24T22:15:03-05:00
+function isoLocal(d){
+  const p=x=>String(Math.abs(x)).padStart(2,"0"), off=-d.getTimezoneOffset();
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+"T"+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())+
+    (off>=0?"+":"-")+p(Math.trunc(off/60))+":"+p(off%60);
+}
+// The data in the snapshot, without the time (so an unchanged budget isn't rewritten).
+function snapshotData(){
+  const c=calc();
+  const categories=[];
+  SNAP_GROUPS.forEach(([k,label])=>(S[k]||[]).forEach(m=>{
+    const budget=snapR(m.budget), spent=snapR(m.spent);
+    categories.push({group:label,name:String(m.name||""),budget,spent,left:snapR(budget-spent)});
+  }));
+  const budgeted=snapR(categories.reduce((t,x)=>t+x.budget,0)), spent=snapR(categories.reduce((t,x)=>t+x.spent,0));
+  return {
+    month:S.monthKey||monthKeyNow(),
+    totals:{cash:snapR(c.cashTotal),savings:snapR(c.savingsTotal),spendable:snapR(c.spendCash),
+      creditCardDebt:snapR(c.ccDebt),loans:snapR(c.mDebt),investments:snapR(c.iTotal),
+      budgeted,spent,left:snapR(budgeted-spent)},
+    categories,
+    accounts:S.cash.map(a=>({name:String(a.name||""),type:a.savings?"savings":"checking",balance:snapR(a.amt)})),
+    creditCards:S.credit.map(a=>({name:String(a.name||""),owed:snapR(a.debt),limit:snapR(a.limit)})),
+    loans:S.monthly.filter(b=>Number(b.debt||0)>0).map(b=>({name:String(b.name||""),owed:snapR(b.debt)})),
+    investments:S.invest.map(a=>({name:String(a.name||""),balance:snapR(a.amt)})),
+  };
+}
+function snapshotFiles(data,when){
+  const d=when||new Date();
+  const json=JSON.stringify({app:"Ledger",format:1,updated:isoLocal(d),...data},null,2)+"\n";
+  const cell=s=>String(s).replace(/\|/g,"\\|").replace(/[\r\n]+/g," ");
+  const mon=new Date(data.month+"-15T12:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
+  const nice=d.toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"});
+  const L=[];
+  L.push("---","updated: "+isoLocal(d),"month: "+data.month,"source: Ledger","---","");
+  L.push("# Ledger budget snapshot","","Updated "+nice+". Written by the Ledger app on every save; edits here get overwritten.","");
+  L.push("## Budget, "+mon,"");
+  if(data.categories.length){
+    L.push("| Category | Budget | Spent | Left |","|---|---:|---:|---:|");
+    SNAP_GROUPS.forEach(([,label])=>data.categories.filter(x=>x.group===label).forEach(x=>
+      L.push(`| ${cell(label+": "+x.name)} | ${fmt(x.budget)} | ${fmt(x.spent)} | ${x.left<0?"−"+fmt(-x.left):fmt(x.left)} |`)));
+    const t=data.totals;
+    L.push(`| **Total** | **${fmt(t.budgeted)}** | **${fmt(t.spent)}** | **${t.left<0?"−"+fmt(-t.left):fmt(t.left)}** |`);
+  } else L.push("No budget categories yet.");
+  L.push("","## Balances","");
+  const rows=[...data.accounts.map(a=>[a.name+(a.type==="savings"?" (savings)":""),fmt(a.balance)]),
+    ...data.creditCards.map(a=>[a.name+" (card, owed)",fmt(a.owed)+(a.limit?" of "+fmt(a.limit):"")]),
+    ...data.loans.map(a=>[a.name+" (owed)",fmt(a.owed)]),
+    ...data.investments.map(a=>[a.name+" (investment)",fmt(a.balance)])];
+  if(rows.length){ L.push("| Account | Balance |","|---|---:|"); rows.forEach(r=>L.push(`| ${cell(r[0])} | ${r[1]} |`)); }
+  else L.push("No accounts yet.");
+  const t=data.totals;
+  L.push("","## Totals","",
+    "- Cash: "+fmt(t.cash)+" ("+fmt(t.savings)+" in savings, "+fmt(t.spendable)+" spendable)",
+    "- Credit card debt: "+fmt(t.creditCardDebt),
+    ...(t.loans?["- Loans: "+fmt(t.loans)]:[]),
+    "- Investments: "+fmt(t.investments),"");
+  return {md:L.join("\n"),json};
+}
+function scheduleSnapshot(){
+  if(!hasSnapshot()) return;
+  clearTimeout(snapTimer);
+  snapTimer=setTimeout(()=>writeSnapshot(false),SNAP_DELAY);
+}
+function writeSnapshot(force){
+  clearTimeout(snapTimer); snapTimer=null;
+  if(!hasSnapshot()||!S) return false;
+  if(!snapInfo().on) return false;
+  try{
+    const data=snapshotData(), key=JSON.stringify(data);
+    if(!force&&key===snapMeta().key&&!snapMeta().err) return false;
+    const f=snapshotFiles(data);
+    snapPendingKey=key;
+    window.Android.snapshotWrite(f.md,f.json);
+    return true;
+  }catch(e){ setSnapMeta({err:"Couldn't build the snapshot: "+(e&&e.message||e)}); return false; }
+}
+// a change made just before leaving the app still gets written
+if(typeof document!=="undefined"&&document.addEventListener){
+  document.addEventListener("visibilitychange",()=>{ if(document.hidden&&snapTimer) writeSnapshot(false); });
+}
+window.ledgerSnapshotStatus=function(ok,msg){
+  if(ok) setSnapMeta({at:Date.now(),key:snapPendingKey,err:""});
+  else if(msg) setSnapMeta({err:msg});
+  if(document.getElementById("snapSheet")) openSnapshot();
+  else if(!ok&&msg&&!/^Cancelled/.test(msg)){ banner="Budget snapshot: "+msg; try{render(true);}catch(e){} }
+};
+window.ledgerSnapshotPicked=function(){ setSnapMeta({key:"",err:""}); writeSnapshot(true); if(document.getElementById("snapSheet")) openSnapshot(); };
+function snapshotOff(){
+  if(!confirm("Stop updating the budget snapshot? The files already saved stay where they are.")) return;
+  try{ window.Android.snapshotOff(); }catch(e){}
+  try{ localStorage.removeItem(SNAP_KEY); }catch(e){}
+  openSnapshot();
+}
+function snapAgo(ts){
+  if(!ts) return "not yet";
+  const m=Math.floor((Date.now()-ts)/60000);
+  return m<1?"just now":m<60?m+" min ago":m<1440?Math.floor(m/60)+" hr ago":agoText(ts);
+}
+function openSnapshot(){
+  const avail=hasSnapshot(), info=snapInfo(), meta=snapMeta();
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="menu" id="snapSheet" style="padding:16px;max-height:88vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-weight:700;font-size:15px">Budget snapshot</div>
+          ${info.on?'<span class="g" style="font-weight:700">On</span>':'<span class="d">Off</span>'}
+        </div>
+        <div class="hint" style="margin-bottom:10px">Keeps two files up to date after every change: a Markdown page for Obsidian and a JSON file for Hermes. They hold balances, each budget category's amount, spent and left, and when it was updated. No account or card numbers.</div>
+        ${!avail?`<div class="hint">This needs the Android app.</div>`:info.on?`
+          <div class="krow"><div class="kl">Markdown</div><div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis">${esc(info.md||"ledger-budget.md")}</div></div>
+          <div class="krow"><div class="kl">JSON</div><div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis">${esc(info.json||"ledger-budget.json")}</div></div>
+          <div class="krow"><div class="kl">Last updated</div><div style="font-size:12px;font-weight:600">${snapAgo(meta.at)}</div></div>
+          ${meta.err?`<div class="r" style="font-size:12px;font-weight:600;margin:8px 0">✗ ${esc(meta.err)}</div>`:""}
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button class="btn" style="width:auto" onclick="writeSnapshot(true)">Update now</button>
+            <button class="btn ghost" style="width:auto" onclick="window.Android.snapshotPick()">Change where…</button>
+            <button class="btn ghost r" style="width:auto" onclick="snapshotOff()">Turn off</button>
+          </div>
+          <div class="hint" style="margin-top:8px">Changing where makes new files. Delete the old ones in Drive so Obsidian and Hermes don't read a stale copy.</div>`:`
+          <div class="hint" style="margin-bottom:10px">Tap below, open <b>Drive</b> in the picker, go to your folder and tap Save. It asks twice, once for each file; the second time it's already in the same folder.</div>
+          ${meta.err?`<div class="r" style="font-size:12px;font-weight:600;margin-bottom:8px">${esc(meta.err)}</div>`:""}
+          <button class="btn" onclick="setSnapMeta({err:''});window.Android.snapshotPick()">Choose where to save…</button>`}
+        <div style="display:flex;justify-content:space-between;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="openSettings()">← Back</button><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
+      </div>
+    </div>`;
 }
 
 // ---------- edit sheet ----------
@@ -2574,6 +2719,7 @@ function openSettings(){
         </button>
         <button onclick="openNotifSettings()">🔔 &nbsp;Notifications ${st.notif?'<span class="g">On</span>':'<span class="d">Off</span>'}</button>
         <button onclick="openBackup()">💾 &nbsp;Backup &amp; restore</button>
+        ${hasSnapshot()?`<button onclick="openSnapshot()">☁️ &nbsp;Budget snapshot ${snapInfo().on?'<span class="g">On</span>':'<span class="d">Off</span>'}</button>`:""}
         <button class="r" onclick="openDanger()">⚠️ &nbsp;Danger zone</button>
         <button class="d" onclick="closeSheet()">Close</button>
       </div>

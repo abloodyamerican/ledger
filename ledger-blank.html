@@ -157,12 +157,23 @@ const VALUE_FIELD = { monthly:"debt", credit:"debt", cash:"amt", invest:"amt" };
 // ---------- state ----------
 let S, tab="budget", editing=null, F=null, banner="", backupStatus="", activeAlerts=[];
 
+const isObj=x=>!!x&&typeof x==="object"&&!Array.isArray(x);
+const LIST_KEYS=Object.keys(SEED).filter(k=>Array.isArray(SEED[k]));
 function migrate(d){
   const base=JSON.parse(JSON.stringify(SEED));
+  if(!isObj(d)) d={};
   d={...base,...d};
-  d.settings={...base.settings,...(d.settings||{})};
-  d.profile={...base.profile,...(d.profile||{})};
-  d.jobs=(d.jobs||[]).map(j=>({rates:[],stubs:[],pct:0,freq:"biweekly",archived:false,title:"",type:"pt",payAnchor:"",labelRates:[],schedule:[],scheduleArchive:[],...j}));
+  // damaged data: anything that should be a list but isn't becomes an empty list,
+  // and junk entries inside lists are dropped, so render() can't crash on them
+  LIST_KEYS.forEach(k=>{ d[k]=!Array.isArray(d[k])?[]:k==="expenseNames"?d[k].filter(x=>typeof x==="string"):d[k].filter(isObj); });
+  d.settings={...base.settings,...(isObj(d.settings)?d.settings:{})};
+  d.profile={...base.profile,...(isObj(d.profile)?d.profile:{})};
+  if(!isObj(d.notified)) d.notified={};
+  if(d.scanMap!==undefined&&!isObj(d.scanMap)) d.scanMap={};
+  const arr=x=>Array.isArray(x)?x:[];
+  d.jobs=d.jobs.map(j=>{ const o={rates:[],stubs:[],pct:0,freq:"biweekly",archived:false,title:"",type:"pt",payAnchor:"",labelRates:[],schedule:[],scheduleArchive:[],...j};
+    ["rates","stubs","labelRates","schedule","scheduleArchive"].forEach(k=>{ o[k]=arr(o[k]).filter(isObj); });
+    return o; });
   if(!d.health) d.health=[];
   if(!d.transport) d.transport=[];
   if(d.healthYear===undefined) d.healthYear=0;
@@ -199,48 +210,121 @@ function syncAnnualToMonthly(){
   });
   if(added){ persist(); banner=`${added} annual bill${added>1?"s":""} added to this month's bills`; }
 }
+// ---------- load / save ----------
+// load() never throws and never overwrites unreadable data: a save that can't be read is
+// copied to a "-corrupt-<time>" key first, and if even that fails, saving is blocked so the
+// original stays untouched until a backup is restored.
+let loadProblem="", saveBlocked=false, saveFailed=false, monthCloseRaw=null;
+function seedCopy(){ return JSON.parse(JSON.stringify(SEED)); }
 function load(){
-  let d;
-  try{ const r=localStorage.getItem(KEY); d = r ? JSON.parse(r) : JSON.parse(JSON.stringify(SEED)); }
-  catch(e){ d=JSON.parse(JSON.stringify(SEED)); }
-  return migrate(d);
+  let raw=null;
+  try{ raw=localStorage.getItem(KEY); }
+  catch(e){ saveBlocked=true; loadProblem="Ledger couldn't open its storage, so nothing will be saved this session. Restart the app; if it keeps happening, restore a backup."; return migrate(seedCopy()); }
+  if(!raw) return migrate(seedCopy());
+  try{
+    const d=JSON.parse(raw);
+    if(!isObj(d)) throw new Error("not a Ledger save");
+    if(d.monthKey&&d.monthKey!==monthKeyNow()) monthCloseRaw=raw;  // backed up before the new month resets it
+    return migrate(d);
+  }catch(e){
+    try{
+      localStorage.setItem(KEY+"-corrupt-"+Date.now(),raw);
+      loadProblem="Your saved data couldn't be read, so Ledger started empty. The unreadable copy is kept safe. Restore your latest backup from Settings → Backup & restore.";
+    }catch(e2){
+      saveBlocked=true;
+      loadProblem="Your saved data couldn't be read, and there's no room to set it aside, so Ledger won't save over it. Restore a backup from Settings → Backup & restore.";
+    }
+    return migrate(seedCopy());
+  }
 }
-function persist(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){} }
 // ---------- undo / redo ----------
-// Snapshot stacks hold JSON of S from BEFORE each user action. checkpoint() is
-// called at the start of a mutating action; undo pops back, redo re-applies.
-let undoStack=[], redoStack=[];
-const UNDO_MAX=40;
+// Every saved change is undoable. persist() compares the new state with the last saved
+// one and, when it changed, pushes the previous state onto the undo stack. A tap or a
+// committed field starts a new undo step; typing in the same field joins one step.
+let undoStack=[], redoStack=[], lastSaved=null, newStep=true, lastChangeAt=0, quietSave=false;
+const UNDO_MAX=40, STEP_GAP=4000;
 function stripTransient(obj){ const c={...obj}; delete c.__undo; return c; }
-function checkpoint(){
-  try{ undoStack.push(JSON.stringify(stripTransient(S))); if(undoStack.length>UNDO_MAX) undoStack.shift(); redoStack=[]; }catch(e){}
+// what counts as "your data" for undo: not the rebalance bar, alert bookkeeping or the month being viewed
+function undoKey(o){ const c={...o}; delete c.__undo; delete c.notified; delete c.viewMonthOffset; return JSON.stringify(c); }
+function checkpoint(){ newStep=true; }
+function trackUndo(cur){
+  if(quietSave||lastSaved===null||cur===lastSaved){ return; }
+  const now=Date.now();
+  if(newStep||!undoStack.length||now-lastChangeAt>STEP_GAP){
+    undoStack.push(lastSaved); if(undoStack.length>UNDO_MAX) undoStack.shift();
+  }
+  redoStack=[]; newStep=false; lastChangeAt=now;
+}
+function persist(){
+  const cur=undoKey(S);
+  trackUndo(cur);
+  // the rebalance Undo/Keep bar only lasts until you change something else
+  if(S.__undo){ if(S.__undo.after==null) S.__undo.after=cur; else if(S.__undo.after!==cur) delete S.__undo; }
+  lastSaved=cur;
+  if(saveBlocked){ showSaveWarn(); return false; }
+  try{ localStorage.setItem(KEY, JSON.stringify(S)); saveFailed=false; }
+  catch(e){ saveFailed=true; }
+  showSaveWarn();
+  if(!saveFailed) scheduleSnapshot();
+  return !saveFailed;
+}
+function showSaveWarn(){
+  let el=document.getElementById("saveWarn");
+  const msg=saveFailed?"NOT SAVED — your last change couldn't be stored (storage full or blocked). Save a backup file now.":
+    (saveBlocked||loadProblem)?loadProblem:"";
+  if(!msg){ if(el) el.remove(); return; }
+  if(!el){ el=document.createElement("div"); el.id="saveWarn"; document.body.insertBefore(el,document.body.firstChild); }
+  el.className="banner"; el.style.cssText="position:sticky;top:0;z-index:60;margin:0;border-radius:0;border-color:var(--red);color:var(--red);background:var(--panel)";
+  el.innerHTML=`<div style="font-weight:700">${esc(msg)}</div><div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+    <button class="btn" style="width:auto;padding:5px 12px;font-size:12px" onclick="doSaveFile()">Save backup file</button>
+    <button class="btn ghost" style="width:auto;padding:5px 12px;font-size:12px" onclick="openBackup()">Restore…</button>
+    ${(!saveFailed&&!saveBlocked)?`<button class="btn ghost" style="width:auto;padding:5px 12px;font-size:12px" onclick="loadProblem='';showSaveWarn()">Dismiss</button>`:""}</div>`;
 }
 function canUndo(){ return undoStack.length>0; }
 function canRedo(){ return redoStack.length>0; }
+// swap in a saved state without recording it as a new change
+function applySnapshot(json){
+  const keep={notified:S.notified,viewMonthOffset:S.viewMonthOffset};
+  S=migrate({...JSON.parse(json),...keep});
+  quietSave=true; try{ persist(); } finally{ quietSave=false; }
+  newStep=true;
+}
 function doUndo(){
   if(!undoStack.length) return;
   try{
-    redoStack.push(JSON.stringify(stripTransient(S)));
     const prev=undoStack.pop();
-    S=migrate(JSON.parse(prev));
-    persist(); checkAlerts(); render();
-    banner="Undone"; render();
+    redoStack.push(undoKey(S));
+    applySnapshot(prev);
+    checkAlerts(); banner="Undone"; render();
   }catch(e){ alert("Couldn't undo."); }
 }
 function doRedo(){
   if(!redoStack.length) return;
   try{
-    undoStack.push(JSON.stringify(stripTransient(S)));
     const next=redoStack.pop();
-    S=migrate(JSON.parse(next));
-    persist(); checkAlerts(); render();
-    banner="Redone"; render();
+    undoStack.push(undoKey(S));
+    applySnapshot(next);
+    checkAlerts(); banner="Redone"; render();
   }catch(e){ alert("Couldn't redo."); }
+}
+// a tap or a finished field edit starts a new undo step
+if(typeof document!=="undefined"&&document.addEventListener){
+  document.addEventListener("click",()=>{ newStep=true; },true);
+  document.addEventListener("change",()=>{ newStep=true; },true);
 }
 function addLog(e){ S.log=[{id:Date.now()+Math.random(),ts:Date.now(),...e},...(S.log||[])].slice(0,200); }
 function propagateLink(link,value){
   if(!link) return;
+  value=Math.round(Number(value||0)*100)/100;  // no 17.999999999 balances
   ["monthly","credit","cash","invest"].forEach(k=>{ S[k]=S[k].map(x=>x.link===link?{...x,[VALUE_FIELD[k]]:value}:x); });
+}
+// current balance of a link group, ignoring one record (the one being saved)
+function linkGroupValue(link,exceptId){
+  for(const k of ["credit","cash","invest","monthly"]){
+    const m=(S[k]||[]).find(x=>x.link===link&&x.id!==exceptId);
+    if(m) return Number(m[VALUE_FIELD[k]]||0);
+  }
+  return null;
 }
 
 // ---------- calc ----------
@@ -601,6 +685,7 @@ function monthLabelFor(offset){
   return d.toLocaleDateString("en-US",{month:"long",year:"numeric"});
 }
 function advanceMonth(){
+  autoBackup("month-close");
   checkpoint();
   S.monthly=S.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
   // auto-added annual bills from the old month don't carry forward
@@ -616,11 +701,13 @@ function advanceMonth(){
 function resetApp(){
   if(!confirm("Wipe EVERYTHING and start fresh?")) return;
   if(!confirm("Last chance — this cannot be undone.")) return;
+  autoBackup("before-reset");
+  checkpoint();
   localStorage.removeItem(KEY);
   S=migrate(JSON.parse(JSON.stringify(SEED))); banner="Fresh start"; tab="budget"; persist(); render();
 }
 function anchorChange(v){ S.payAnchor=v; persist(); render(); }
-function clearLog(){ if(confirm("Clear all history?")){ S.log=[]; persist(); render(); } }
+function clearLog(){ if(confirm("Clear all history?")){ checkpoint(); S.log=[]; persist(); render(); } }
 function softHdr(){ const h=document.getElementById("hdrStats"); if(h) h.innerHTML=hdrStatsHTML(calc()); }
 
 // ---------- jobs ----------
@@ -631,7 +718,7 @@ function addJob(){
 function addJobEdit(){ addJob(); const j=S.jobs[S.jobs.length-1]; openJobEdit(j.id); }
 function delJob(id){
   const j=S.jobs.find(x=>x.id===id);
-  if(confirm(`Delete "${j.name}" and its ${j.stubs.length} saved stub(s)?`)){ S.jobs=S.jobs.filter(x=>x.id!==id); persist(); render(); }
+  if(confirm(`Delete "${j.name}" and its ${j.stubs.length} saved stub(s)?`)){ checkpoint(); S.jobs=S.jobs.filter(x=>x.id!==id); persist(); render(); }
 }
 function jobField(id,k,v){ S.jobs=S.jobs.map(j=>j.id===id?{...j,[k]:k==="pct"?(parseFloat(v)||0):v}:j); persist(); if(k==="pct") softHdr(); }
 function jobEditDone(id){ S.jobs=S.jobs.map(j=>j.id!==id?j:{...j,name:titleCase(j.name),title:titleCase(j.title||"")}); persist(); closeSheet(); render(); }
@@ -793,6 +880,7 @@ function saveStub(){
     gross:s.g,net:s.cur.net, // used by estimates
     pct:s.g?r2(((s.g-s.cur.net)/s.g)*100):0,
   };
+  checkpoint();
   j.stubs=[stub,...(j.stubs||[])];
   // learn saved options + percentages for future autofill (saved list = exactly this stub's rows)
   j.earningTypes=stub.earnings.map(e=>({name:e.name,jobTitle:e.jobTitle,rate:e.rate}));
@@ -805,6 +893,7 @@ function saveStub(){
 }
 function delStub(jid,sid){
   if(!confirm("Delete this stub from history?")) return;
+  checkpoint();
   S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,stubs:j.stubs.filter(s=>s.id!==sid)});
   persist(); openHistory(jid);
 }
@@ -862,12 +951,13 @@ function backupString(includePhoto){
   if(clone.profile&&clone.profile.photo){ clone.profile={...clone.profile,photo:""}; }
   return JSON.stringify(clone);
 }
-function doBackup(){ const ta=document.getElementById("bk"); ta.value=backupString(false); backupStatus="✓ Backup generated below (photo excluded to keep it small)"; render(true); }
+function doBackup(){ const ta=document.getElementById("bk"); if(!ta) return; ta.value=backupString(false); setBackupStatus("✓ Backup text below (photo left out to keep it small)"); }
 function doCopy(){
   const ta=document.getElementById("bk");
+  if(!ta) return;
   if(!ta.value) ta.value=backupString(false);
   const txt=ta.value;
-  const done=o=>{ backupStatus=o?"✓ Copied to clipboard":"Couldn't auto-copy — long-press the box to copy manually"; render(true); };
+  const done=o=>{ setBackupStatus(o?"✓ Copied to clipboard":"Couldn't auto-copy — long-press the box to copy manually"); };
   if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(()=>done(true)).catch(()=>{ ta.select(); done(document.execCommand("copy")); }); }
   else { ta.select(); done(document.execCommand("copy")); }
 }
@@ -879,27 +969,264 @@ function doSaveFile(){
   try{
     if(window.Android&&window.Android.saveBackup){
       window.Android.saveBackup(name,txt);
-      backupStatus="Opening file picker — choose where to save "+name;
+      setBackupStatus("Choose where to save "+name);
     } else {
       // browser fallback: trigger a download
       const blob=new Blob([txt],{type:"application/json"});
       const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; a.click();
-      backupStatus="✓ Downloaded "+name;
+      setBackupStatus("✓ Downloaded "+name);
     }
-  }catch(e){ backupStatus="✗ Couldn't save file — use Copy instead"; }
-  render(true);
+  }catch(e){ setBackupStatus("✗ Couldn't save the file. Use Copy instead."); }
 }
 // Called from native code after a file save completes.
-window.ledgerBackupStatus=function(msg){ backupStatus=msg; try{render(true);}catch(e){} };
+window.ledgerBackupStatus=function(msg){ setBackupStatus(msg); };
+function setBackupStatus(msg){
+  backupStatus=msg;
+  const el=document.getElementById("bkStatus");
+  if(el){ el.textContent=msg; el.className=msg.startsWith("✗")?"r":"g"; el.style.display=msg?"":"none"; }
+}
+
+// ---- restore: validate, confirm, undoable ----
+function checkBackup(p){
+  if(!isObj(p)) return "That isn't a Ledger backup.";
+  const core=["monthly","cash","credit","jobs","misc","annual","invest"];
+  if(!core.some(k=>Array.isArray(p[k]))) return "That isn't a Ledger backup (no bills, accounts or jobs in it).";
+  for(const k of core) if(p[k]!=null&&!Array.isArray(p[k])) return `This backup looks damaged (its ${k} list is broken).`;
+  const keepBanner=banner;
+  try{ migrate(JSON.parse(JSON.stringify(p))); }catch(e){ banner=keepBanner; return "This backup looks damaged and can't be loaded."; }
+  banner=keepBanner;
+  return "";
+}
+function backupSummary(p){
+  const n=k=>Array.isArray(p[k])?p[k].length:0;
+  const stubs=(Array.isArray(p.jobs)?p.jobs:[]).reduce((t,j)=>t+(j&&Array.isArray(j.stubs)?j.stubs.length:0),0);
+  const parts=[`${n("monthly")} bills`,`${n("cash")+n("invest")} accounts`,`${n("credit")} cards`,`${n("jobs")} jobs`,`${stubs} paystubs`];
+  return parts.join(", ")+(p.monthKey?` · saved in ${p.monthKey}`:"");
+}
+function restoreFrom(text,source){
+  let p;
+  try{ p=JSON.parse(String(text||"").trim()); }
+  catch(e){ setBackupStatus("✗ Couldn't read that — it isn't backup text. Use a file from Save to file, or the exact text from Backup."); return false; }
+  const bad=checkBackup(p);
+  if(bad){ setBackupStatus("✗ "+bad); return false; }
+  if(!confirm(`Restore this backup${source?" ("+source+")":""}?\n\n${backupSummary(p)}\n\nIt replaces everything in Ledger now. You can undo it from the profile menu.`)) return false;
+  if(saveBlocked){
+    // the unreadable save is being replaced on purpose: keep a copy of it first
+    try{ const old=localStorage.getItem(KEY); if(old) autoBackup("unreadable",old); }catch(e){}
+    saveBlocked=false; loadProblem="";
+  } else autoBackup("before-restore");
+  checkpoint();
+  // keep the current photo if the backup left it out
+  if(isObj(p.profile)&&!p.profile.photo&&S.profile&&S.profile.photo) p.profile.photo=S.profile.photo;
+  S=migrate(p); persist();
+  syncAnnualToMonthly(); checkAlerts();
+  banner="Backup restored. Undo from the profile menu if it wasn't the right one.";
+  closeSheet(); render();
+  return true;
+}
 function doRestore(){
   const ta=document.getElementById("bk");
+  if(!ta) return;
+  if(restoreFrom(ta.value,"pasted text")) ta.value="";
+}
+function restoreFileChosen(inp){
+  const f=inp.files&&inp.files[0]; inp.value="";
+  if(!f) return;
+  if(f.size>20*1024*1024){ setBackupStatus("✗ That file is too big to be a Ledger backup."); return; }
+  const r=new FileReader();
+  r.onload=()=>restoreFrom(r.result,f.name);
+  r.onerror=()=>setBackupStatus("✗ Couldn't open that file.");
+  r.readAsText(f);
+}
+
+// ---- automatic backups ----
+// Written to Documents/Ledger on the phone (visible in My Files, survives uninstall),
+// on "Start next month", before a restore or reset, at the calendar month change and
+// once a week. The Android side keeps the newest 8.
+const AUTO_KEY=KEY+"-autoBackupAt";
+function hasAutoBackup(){ return !!(typeof window!=="undefined"&&window.Android&&typeof window.Android.autoBackup==="function"); }
+function lastAutoBackupAt(){ try{ return Number(localStorage.getItem(AUTO_KEY)||0); }catch(e){ return 0; } }
+function autoBackup(reason,raw){
+  if(!hasAutoBackup()) return false;
   try{
-    const p=JSON.parse(ta.value.trim());
-    if(!p.monthly||!p.cash) throw 0;
-    // preserve current photo if the restored backup omitted it
-    if(p.profile&&!p.profile.photo&&S.profile&&S.profile.photo) p.profile.photo=S.profile.photo;
-    S=migrate(p); persist(); backupStatus="✓ Data restored"; ta.value=""; render();
-  }catch(e){ backupStatus="✗ Invalid backup — paste the exact text from a previous Backup"; render(true); }
+    const d=new Date(), p=x=>String(x).padStart(2,"0");
+    const stamp=d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+"_"+p(d.getHours())+p(d.getMinutes());
+    const name="ledger-auto-"+stamp+"-"+reason+".json";
+    window.Android.autoBackup(name,raw||backupString(true));
+    try{ localStorage.setItem(AUTO_KEY,String(Date.now())); }catch(e){}
+    return true;
+  }catch(e){ return false; }
+}
+window.ledgerAutoBackupStatus=function(ok,msg){
+  if(!ok){ banner="Automatic backup failed: "+msg+". Save one from Settings → Backup & restore."; try{render(true);}catch(e){} }
+};
+function weeklyAutoBackup(){
+  if(Date.now()-lastAutoBackupAt()>7*24*3600*1000) autoBackup("weekly");
+}
+function autoBackupList(){
+  if(!(hasAutoBackup()&&typeof window.Android.listBackups==="function")) return [];
+  try{ const l=JSON.parse(window.Android.listBackups()||"[]"); return Array.isArray(l)?l:[]; }catch(e){ return []; }
+}
+function restoreAuto(i){
+  const item=autoBackupList()[i];
+  if(!item) return;
+  let txt="";
+  try{ txt=window.Android.readBackup(item.name)||""; }catch(e){}
+  if(!txt){ setBackupStatus("✗ Couldn't open "+item.name+"."); return; }
+  restoreFrom(txt,item.name);
+}
+function backupNow(){
+  if(autoBackup("manual")) setBackupStatus("✓ Saved to Documents/Ledger"); else doSaveFile();
+  if(document.getElementById("bkStatus")) openBackup();
+}
+function agoText(ts){
+  if(!ts) return "never";
+  const days=Math.floor((Date.now()-ts)/86400000);
+  return days<=0?"today":days===1?"yesterday":days+" days ago";
+}
+
+// ---- budget snapshot (Markdown for Obsidian + JSON for Hermes) ----
+// After each save, Ledger overwrites two files you picked once (e.g. in a Google Drive
+// folder). Budget data only: balances, categories (amount, spent, left) and when it was
+// updated. No account or card numbers, links, notes or paystubs go in it.
+const SNAP_KEY=KEY+"-snapshot";       // {at, key, err}
+const SNAP_DELAY=3000;                // wait for typing to settle before writing
+const SNAP_GROUPS=[["misc","Misc"],["health","Health"],["transport","Transportation"]];
+let snapTimer=null, snapPendingKey="";
+function hasSnapshot(){ return !!(typeof window!=="undefined"&&window.Android&&typeof window.Android.snapshotWrite==="function"); }
+function snapInfo(){
+  if(!hasSnapshot()||typeof window.Android.snapshotInfo!=="function") return {on:false};
+  try{ const o=JSON.parse(window.Android.snapshotInfo()||"{}"); return isObj(o)?o:{on:false}; }catch(e){ return {on:false}; }
+}
+function snapMeta(){ try{ const o=JSON.parse(localStorage.getItem(SNAP_KEY)||"{}"); return isObj(o)?o:{}; }catch(e){ return {}; } }
+function setSnapMeta(m){ try{ localStorage.setItem(SNAP_KEY,JSON.stringify({...snapMeta(),...m})); }catch(e){} }
+const snapR=n=>Math.round(Number(n||0)*100)/100;
+// local time with its UTC offset, e.g. 2026-11-24T22:15:03-05:00
+function isoLocal(d){
+  const p=x=>String(Math.abs(x)).padStart(2,"0"), off=-d.getTimezoneOffset();
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+"T"+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())+
+    (off>=0?"+":"-")+p(Math.trunc(off/60))+":"+p(off%60);
+}
+// The data in the snapshot, without the time (so an unchanged budget isn't rewritten).
+function snapshotData(){
+  const c=calc();
+  const categories=[];
+  SNAP_GROUPS.forEach(([k,label])=>(S[k]||[]).forEach(m=>{
+    const budget=snapR(m.budget), spent=snapR(m.spent);
+    categories.push({group:label,name:String(m.name||""),budget,spent,left:snapR(budget-spent)});
+  }));
+  const budgeted=snapR(categories.reduce((t,x)=>t+x.budget,0)), spent=snapR(categories.reduce((t,x)=>t+x.spent,0));
+  return {
+    month:S.monthKey||monthKeyNow(),
+    totals:{cash:snapR(c.cashTotal),savings:snapR(c.savingsTotal),spendable:snapR(c.spendCash),
+      creditCardDebt:snapR(c.ccDebt),loans:snapR(c.mDebt),investments:snapR(c.iTotal),
+      budgeted,spent,left:snapR(budgeted-spent)},
+    categories,
+    accounts:S.cash.map(a=>({name:String(a.name||""),type:a.savings?"savings":"checking",balance:snapR(a.amt)})),
+    creditCards:S.credit.map(a=>({name:String(a.name||""),owed:snapR(a.debt),limit:snapR(a.limit)})),
+    loans:S.monthly.filter(b=>Number(b.debt||0)>0).map(b=>({name:String(b.name||""),owed:snapR(b.debt)})),
+    investments:S.invest.map(a=>({name:String(a.name||""),balance:snapR(a.amt)})),
+  };
+}
+function snapshotFiles(data,when){
+  const d=when||new Date();
+  const json=JSON.stringify({app:"Ledger",format:1,updated:isoLocal(d),...data},null,2)+"\n";
+  const cell=s=>String(s).replace(/\|/g,"\\|").replace(/[\r\n]+/g," ");
+  const mon=new Date(data.month+"-15T12:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
+  const nice=d.toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"});
+  const L=[];
+  L.push("---","updated: "+isoLocal(d),"month: "+data.month,"source: Ledger","---","");
+  L.push("# Ledger budget snapshot","","Updated "+nice+". Written by the Ledger app on every save; edits here get overwritten.","");
+  L.push("## Budget, "+mon,"");
+  if(data.categories.length){
+    L.push("| Category | Budget | Spent | Left |","|---|---:|---:|---:|");
+    SNAP_GROUPS.forEach(([,label])=>data.categories.filter(x=>x.group===label).forEach(x=>
+      L.push(`| ${cell(label+": "+x.name)} | ${fmt(x.budget)} | ${fmt(x.spent)} | ${x.left<0?"−"+fmt(-x.left):fmt(x.left)} |`)));
+    const t=data.totals;
+    L.push(`| **Total** | **${fmt(t.budgeted)}** | **${fmt(t.spent)}** | **${t.left<0?"−"+fmt(-t.left):fmt(t.left)}** |`);
+  } else L.push("No budget categories yet.");
+  L.push("","## Balances","");
+  const rows=[...data.accounts.map(a=>[a.name+(a.type==="savings"?" (savings)":""),fmt(a.balance)]),
+    ...data.creditCards.map(a=>[a.name+" (card, owed)",fmt(a.owed)+(a.limit?" of "+fmt(a.limit):"")]),
+    ...data.loans.map(a=>[a.name+" (owed)",fmt(a.owed)]),
+    ...data.investments.map(a=>[a.name+" (investment)",fmt(a.balance)])];
+  if(rows.length){ L.push("| Account | Balance |","|---|---:|"); rows.forEach(r=>L.push(`| ${cell(r[0])} | ${r[1]} |`)); }
+  else L.push("No accounts yet.");
+  const t=data.totals;
+  L.push("","## Totals","",
+    "- Cash: "+fmt(t.cash)+" ("+fmt(t.savings)+" in savings, "+fmt(t.spendable)+" spendable)",
+    "- Credit card debt: "+fmt(t.creditCardDebt),
+    ...(t.loans?["- Loans: "+fmt(t.loans)]:[]),
+    "- Investments: "+fmt(t.investments),"");
+  return {md:L.join("\n"),json};
+}
+function scheduleSnapshot(){
+  if(!hasSnapshot()) return;
+  clearTimeout(snapTimer);
+  snapTimer=setTimeout(()=>writeSnapshot(false),SNAP_DELAY);
+}
+function writeSnapshot(force){
+  clearTimeout(snapTimer); snapTimer=null;
+  if(!hasSnapshot()||!S) return false;
+  if(!snapInfo().on) return false;
+  try{
+    const data=snapshotData(), key=JSON.stringify(data);
+    if(!force&&key===snapMeta().key&&!snapMeta().err) return false;
+    const f=snapshotFiles(data);
+    snapPendingKey=key;
+    window.Android.snapshotWrite(f.md,f.json);
+    return true;
+  }catch(e){ setSnapMeta({err:"Couldn't build the snapshot: "+(e&&e.message||e)}); return false; }
+}
+// a change made just before leaving the app still gets written
+if(typeof document!=="undefined"&&document.addEventListener){
+  document.addEventListener("visibilitychange",()=>{ if(document.hidden&&snapTimer) writeSnapshot(false); });
+}
+window.ledgerSnapshotStatus=function(ok,msg){
+  if(ok) setSnapMeta({at:Date.now(),key:snapPendingKey,err:""});
+  else if(msg) setSnapMeta({err:msg});
+  if(document.getElementById("snapSheet")) openSnapshot();
+  else if(!ok&&msg&&!/^Cancelled/.test(msg)){ banner="Budget snapshot: "+msg; try{render(true);}catch(e){} }
+};
+window.ledgerSnapshotPicked=function(){ setSnapMeta({key:"",err:""}); writeSnapshot(true); if(document.getElementById("snapSheet")) openSnapshot(); };
+function snapshotOff(){
+  if(!confirm("Stop updating the budget snapshot? The files already saved stay where they are.")) return;
+  try{ window.Android.snapshotOff(); }catch(e){}
+  try{ localStorage.removeItem(SNAP_KEY); }catch(e){}
+  openSnapshot();
+}
+function snapAgo(ts){
+  if(!ts) return "not yet";
+  const m=Math.floor((Date.now()-ts)/60000);
+  return m<1?"just now":m<60?m+" min ago":m<1440?Math.floor(m/60)+" hr ago":agoText(ts);
+}
+function openSnapshot(){
+  const avail=hasSnapshot(), info=snapInfo(), meta=snapMeta();
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="menu" id="snapSheet" style="padding:16px;max-height:88vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-weight:700;font-size:15px">Budget snapshot</div>
+          ${info.on?'<span class="g" style="font-weight:700">On</span>':'<span class="d">Off</span>'}
+        </div>
+        <div class="hint" style="margin-bottom:10px">Keeps two files up to date after every change: a Markdown page for Obsidian and a JSON file for Hermes. They hold balances, each budget category's amount, spent and left, and when it was updated. No account or card numbers.</div>
+        ${!avail?`<div class="hint">This needs the Android app.</div>`:info.on?`
+          <div class="krow"><div class="kl">Markdown</div><div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis">${esc(info.md||"ledger-budget.md")}</div></div>
+          <div class="krow"><div class="kl">JSON</div><div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis">${esc(info.json||"ledger-budget.json")}</div></div>
+          <div class="krow"><div class="kl">Last updated</div><div style="font-size:12px;font-weight:600">${snapAgo(meta.at)}</div></div>
+          ${meta.err?`<div class="r" style="font-size:12px;font-weight:600;margin:8px 0">✗ ${esc(meta.err)}</div>`:""}
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button class="btn" style="width:auto" onclick="writeSnapshot(true)">Update now</button>
+            <button class="btn ghost" style="width:auto" onclick="window.Android.snapshotPick()">Change where…</button>
+            <button class="btn ghost r" style="width:auto" onclick="snapshotOff()">Turn off</button>
+          </div>
+          <div class="hint" style="margin-top:8px">Changing where makes new files. Delete the old ones in Drive so Obsidian and Hermes don't read a stale copy.</div>`:`
+          <div class="hint" style="margin-bottom:10px">Tap below, open <b>Drive</b> in the picker, go to your folder and tap Save. It asks twice, once for each file; the second time it's already in the same folder.</div>
+          ${meta.err?`<div class="r" style="font-size:12px;font-weight:600;margin-bottom:8px">${esc(meta.err)}</div>`:""}
+          <button class="btn" onclick="setSnapMeta({err:''});window.Android.snapshotPick()">Choose where to save…</button>`}
+        <div style="display:flex;justify-content:space-between;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="openSettings()">← Back</button><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
+      </div>
+    </div>`;
 }
 
 // ---------- edit sheet ----------
@@ -954,6 +1281,17 @@ function saveSheet(){
   const key=editing.tab;
   if(F.name!=null) F.name=titleCase(F.name);
   if(F.tag!=null&&F.tag!=="") F.tag=titleCase(F.tag);
+  // Linked records share one balance. Only push this record's balance to the group when you
+  // actually changed it here; otherwise it takes the group's balance (so adding "Visa payment"
+  // with debt left at 0 no longer wipes the card's real balance).
+  const vfLink=VALUE_FIELD[key];
+  let pushLink=false;
+  if(F.link&&vfLink){
+    const group=linkGroupValue(F.link,editing.item?editing.item.id:undefined);
+    const mine=Number(F[vfLink]||0);
+    const changedHere=editing.item?(Math.abs(mine-Number(editing.item[vfLink]||0))>0.001||editing.item.link!==F.link&&group===null):mine!==0;
+    if(group===null||changedHere) pushLink=true; else F[vfLink]=group;
+  }
   if(editing.item){
     S[key]=S[key].map(x=>x.id===F.id?F:x);
     const vf=(ADJ[key]||[])[0];
@@ -962,7 +1300,7 @@ function saveSheet(){
       if(Math.abs(after-before)>0.001) addLog({name:F.name,action:vf,delta:after-before,cat:key});
     }
   } else { F.id=Date.now(); S[key].push(F); addLog({name:F.name,action:"added",delta:0,cat:key}); }
-  if(F.link&&VALUE_FIELD[key]) propagateLink(F.link,F[VALUE_FIELD[key]]);
+  if(pushLink) propagateLink(F.link,F[vfLink]);
   // keep APR consistent across linked records
   if(F.link){
     if(Number(F.apr||0)>0){
@@ -1961,6 +2299,7 @@ function openRebalance(){
     </div>`;
 }
 function rebalanceApply(priority){
+  checkpoint();
   const clean={...S}; delete clean.__undo;
   const snapshot=JSON.stringify(clean);
   const c=calc();
@@ -2023,7 +2362,7 @@ function rebalanceApply(priority){
   } else {
     changes.push("Your budget already lines up with your minimum income — nothing worth changing.");
   }
-  S.__undo={snapshot,ts:Date.now(),changes};
+  S.__undo={snapshot,ts:Date.now(),changes,after:undoKey(S)};
   persist(); checkAlerts(); closeSheet(); render();
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
@@ -2041,7 +2380,8 @@ function rebalanceUndo(){
   try{
     const restored=JSON.parse(snap);
     delete restored.__undo;
-    S=migrate(restored);
+    checkpoint();
+    S=migrate({...restored,notified:S.notified,viewMonthOffset:S.viewMonthOffset});
     persist(); checkAlerts(); render();
     banner="Rebalance undone — your budget is back how it was";
     render();
@@ -2379,6 +2719,7 @@ function openSettings(){
         </button>
         <button onclick="openNotifSettings()">🔔 &nbsp;Notifications ${st.notif?'<span class="g">On</span>':'<span class="d">Off</span>'}</button>
         <button onclick="openBackup()">💾 &nbsp;Backup &amp; restore</button>
+        ${hasSnapshot()?`<button onclick="openSnapshot()">☁️ &nbsp;Budget snapshot ${snapInfo().on?'<span class="g">On</span>':'<span class="d">Off</span>'}</button>`:""}
         <button class="r" onclick="openDanger()">⚠️ &nbsp;Danger zone</button>
         <button class="d" onclick="closeSheet()">Close</button>
       </div>
@@ -2410,19 +2751,33 @@ function openNotifSettings(){
     </div>`;
 }
 function openBackup(){
+  const auto=hasAutoBackup(), list=autoBackupList();
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
-      <div class="menu" style="padding:16px">
+      <div class="menu" style="padding:16px;max-height:88vh;overflow-y:auto">
         <div style="font-weight:700;font-size:15px;margin-bottom:10px">Backup &amp; restore</div>
-        <div class="hint" style="margin-bottom:10px">Backup copies all your data as text — save it anywhere. Paste it back to restore, including into future versions. "Save to file" writes a .json you can store or share (no size limits).</div>
-        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-          <button class="btn" style="width:auto" onclick="doBackup()">Backup</button>
-          <button class="btn ghost" style="width:auto" onclick="doCopy()">Copy</button>
-          <button class="btn ghost" style="width:auto" onclick="doSaveFile()">Save to file</button>
-          <button class="btn ghost" style="width:auto" onclick="doRestore()">Restore</button>
-        </div>
-        ${backupStatus?`<div style="font-size:12px;font-weight:600;margin-bottom:8px" class="${backupStatus.startsWith("✗")?"r":"g"}">${backupStatus}</div>`:""}
-        <textarea id="bk" placeholder="Backup appears here / paste one here to restore" style="height:80px;font-size:10px;resize:vertical"></textarea>
+        ${auto?`<div class="hint" style="margin-bottom:8px">Automatic backups go to <b>Documents/Ledger</b> (My Files): weekly, on Start next month, at each new month and before a restore. The newest 8 are kept. Last one: <b>${agoText(lastAutoBackupAt())}</b>.</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button class="btn" style="width:auto" onclick="backupNow()">Back up now</button>
+          <button class="btn ghost" style="width:auto" onclick="doSaveFile()">Save a copy elsewhere…</button>
+        </div>`:`<div class="hint" style="margin-bottom:10px">Save a backup file now and then. Automatic backups need the Android app.</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button class="btn" style="width:auto" onclick="doSaveFile()">Save to file</button>
+        </div>`}
+        <div id="bkStatus" style="font-size:12px;font-weight:600;margin-bottom:8px;${backupStatus?"":"display:none"}" class="${backupStatus.startsWith("✗")?"r":"g"}">${esc(backupStatus)}</div>
+        <div style="font-weight:700;font-size:13px;margin:6px 0">Restore</div>
+        <div class="hint" style="margin-bottom:8px">Shows what's in the backup and asks first. You can undo a restore from the profile menu.</div>
+        ${list.length?`<div class="hint" style="margin-bottom:4px">Automatic backups:</div>
+          ${list.map((x,i)=>`<button style="display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="restoreAuto(${i})"><span style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(x.name.replace(/^ledger-auto-/,"").replace(/\.json$/,""))}</span><span class="b" style="font-size:11px">Restore</span></button>`).join("")}`:""}
+        <label class="btn ghost" style="width:auto;display:inline-block;margin:8px 0;cursor:pointer">Restore from a file…<input type="file" accept=".json,application/json,text/plain" style="display:none" onchange="restoreFileChosen(this)"></label>
+        <details style="margin-top:6px"><summary class="hint">Copy or paste backup text</summary>
+          <div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">
+            <button class="btn ghost" style="width:auto" onclick="doBackup()">Show backup text</button>
+            <button class="btn ghost" style="width:auto" onclick="doCopy()">Copy</button>
+            <button class="btn ghost" style="width:auto" onclick="doRestore()">Restore pasted text</button>
+          </div>
+          <textarea id="bk" placeholder="Backup text appears here / paste one here to restore" style="height:80px;font-size:10px;resize:vertical"></textarea>
+        </details>
         <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn ghost" style="width:auto" onclick="openSettings()">← Back</button><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
       </div>
     </div>`;
@@ -2546,7 +2901,7 @@ function photoPick(inp){
   };
   rd.readAsDataURL(f);
 }
-function saveProfile(){ S.profile={...P}; persist(); closeSheet(); render(); }
+function saveProfile(){ checkpoint(); S.profile={...P}; persist(); closeSheet(); render(); }
 
 // ---- pay stubs page ----
 let stubSelJob=null, stubSelId=null;
@@ -2586,6 +2941,7 @@ function renderStubsPage(){
 }
 function delStubFromPage(jid,sid){
   if(!confirm("Delete this stub from history?")) return;
+  checkpoint();
   S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,stubs:j.stubs.filter(s=>s.id!==sid)});
   stubSelId=null; persist(); openStubsPage(); render(true);
 }
@@ -3217,18 +3573,49 @@ function render(keepScroll){
   if(y!=null) window.scrollTo(0,y);
 }
 
+// Called by MainActivity on Back. Returns true when it closed something.
+window.ledgerBack=function(){
+  try{
+    if(scanCtx&&scanCtx.waiting){ scanCtx.waiting=false; scanBack(); return true; }
+    const host=document.getElementById("sheetHost");
+    if(host&&host.innerHTML.trim()){
+      if(editing&&editing.tab==="stub") tryCloseSheet(); else closeSheet();
+      return true;
+    }
+  }catch(e){}
+  return false;
+};
 document.addEventListener("focusin",e=>{
   if(e.target&&/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)){
     setTimeout(()=>{ try{ e.target.scrollIntoView({block:"center",behavior:"smooth"}); }catch(_){}}, 250);
   }
 });
-S=load(); persist();
-S.viewMonthOffset=0;  // always open on the real current month; month nav is view-only
-archiveExpiredSchedules();
-syncAnnualToMonthly();
-checkAlerts();
-render();
-setInterval(checkAlerts,30*60*1000);
+function boot(){
+  S=load();
+  S.viewMonthOffset=0;  // always open on the real current month; month nav is view-only
+  // the month just changed on the calendar: keep the closing month's data first
+  if(monthCloseRaw){ autoBackup("month-close",monthCloseRaw); monthCloseRaw=null; }
+  // start-up housekeeping isn't something you'd want to undo
+  quietSave=true;
+  try{ persist(); archiveExpiredSchedules(); syncAnnualToMonthly(); checkAlerts(); } finally{ quietSave=false; }
+  render();
+  showSaveWarn();
+  weeklyAutoBackup();
+  setInterval(checkAlerts,30*60*1000);
+}
+// If the saved data still can't be shown, don't white-screen: offer to save it and recover.
+function bootFailed(err){
+  let raw=""; try{ raw=localStorage.getItem(KEY)||""; }catch(e){}
+  saveBlocked=true;  // never overwrite the data we couldn't show
+  document.getElementById("app").innerHTML=`<div class="wrap" style="padding:16px">
+    <div class="banner" style="border-color:var(--red);color:var(--red)"><b>Ledger hit a problem showing your data.</b> Nothing has been changed or saved over.</div>
+    <div class="hint" style="margin:10px 0">Save your data to a file first, then try restoring an earlier backup. Error: ${esc(err&&err.message||String(err))}</div>
+    <button class="btn" onclick="(window.Android&&window.Android.saveBackup)?window.Android.saveBackup('ledger-rescue.json',document.getElementById('rawData').value):0">Save my data to a file</button>
+    <button class="btn ghost" style="margin-top:8px" onclick="openBackup()">Restore a backup…</button>
+    <textarea id="rawData" readonly style="margin-top:10px;height:120px;font-size:10px">${esc(raw)}</textarea>
+  </div>`;
+}
+try{ boot(); }catch(e){ try{ bootFailed(e); }catch(_){} }
 </script>
 </body>
 </html>

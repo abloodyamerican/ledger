@@ -1,6 +1,7 @@
-# Builds a debug APK on every push to master (or by hand from the Actions tab)
-# and publishes it as a GitHub Release, so it can be downloaded and installed
-# straight from a phone.
+# Builds a debug APK on every push (or by hand from the Actions tab). Pushes to
+# master also publish it as a GitHub Release, so it can be downloaded and installed
+# straight from a phone. Other branches only check that the code compiles and keep
+# the APK with the run; they never publish a Release.
 #
 # One-time setup: add a repository secret named DEBUG_KEYSTORE_B64 holding the
 # base64 of the PC's debug key (C:\Users\<you>\.android\debug.keystore), so
@@ -11,14 +12,14 @@ name: Debug APK
 
 on:
   push:
-    branches: [master]
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
   contents: write   # needed to create the Release
 
 concurrency:
-  group: debug-apk
+  group: debug-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -60,7 +61,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publish as a Release
-        if: steps.key.outputs.have_key == 'true'
+        if: steps.key.outputs.have_key == 'true' && github.ref == 'refs/heads/master'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
