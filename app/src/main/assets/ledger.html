@@ -86,6 +86,30 @@
   .stubtbl{width:100%;font-size:12px}
   .stubtbl .trow{display:flex;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)}
   .stubtbl .thead{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+  /* paystub entry: two columns folded, one line per row unfolded */
+  .sheet.stubsheet{padding-bottom:0}
+  .strow{border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px}
+  .sthead{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+  .sthead input,.sthead select{padding:8px;font-size:14px}
+  .stg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .stg label{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .stg label>span{font-size:11px;color:var(--dim)}
+  .stg input{width:100%;padding:8px 6px;font-size:14px}
+  .stdel{background:none;border:none;color:var(--dim);font-size:20px;width:36px;height:36px;padding:0;flex:none}
+  .stsum{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .stsum .col{border:1px solid var(--line);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:6px}
+  .stsum label{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;color:var(--dim)}
+  .stsum input{width:96px;text-align:right;padding:6px;font-size:13px}
+  .stbar{position:sticky;bottom:0;background:var(--panel);border-top:1px solid var(--line);margin:12px -16px 0;padding:10px 16px calc(12px + env(safe-area-inset-bottom,0px));display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:2}
+  .stbar .lbl{font-size:11px;color:var(--dim)}
+  .stbar .net{font-size:18px;font-weight:700}
+  @media (min-width:700px){
+    .sheet.centered.stubsheet{width:min(940px,96vw)}
+    .strow.wide{display:grid;grid-template-columns:minmax(150px,1fr) 3fr;gap:10px;align-items:end}
+    .strow.wide .sthead{margin-bottom:0}
+    .stg.c4{grid-template-columns:repeat(4,minmax(0,1fr))}
+    .stg.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  }
 </style>
 </head>
 <body>
@@ -495,7 +519,7 @@ function calc(){
     }
     const gMin=usingSchedule?schedGross:grossMin, gMax=usingSchedule?schedGross:grossMax;
     const nMin=usingSchedule?schedNet:netMin, nMax=usingSchedule?schedNet:netMax;
-    const stubs=(j.stubs||[]).slice().sort((a,b)=>(a.payDate||"").localeCompare(b.payDate||""));
+    const stubs=sortedStubs(j);
     const recent=stubs.length?stubs[stubs.length-1]:null;
     const ytdNet=recent?(recent.summary?.ytd?.net||recent.net||0):0;
     const ytdGross=recent?(recent.summary?.ytd?.gtw||recent.gross||0):0;
@@ -944,33 +968,168 @@ function resetJobPct(jid){
 // ---------- itemized paystub entry ----------
 const r2=n=>Math.round((Number(n)||0)*100)/100;
 
+// Stub order: by pay date. A stub saved without one (older versions allowed that) sorts by
+// the day it was saved instead of last, so the YTD chain never skips back to an older stub.
+function stubKey(st){
+  if(!st) return "";
+  if(st.payDate) return st.payDate;
+  const d=new Date(Number(st.id)||0);
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+function stubCmp(a,b){ return stubKey(a).localeCompare(stubKey(b))||((Number(a.id)||0)-(Number(b.id)||0)); }
+function sortedStubs(j){ return ((j&&j.stubs)||[]).slice().sort(stubCmp); } // oldest first
+function latestStub(j){ const l=sortedStubs(j); return l.length?l[l.length-1]:null; }
+// The stub this one's YTD adds onto: the newest one paid before it, in the same year.
+function priorStubFor(j,payDate,selfId){
+  const list=sortedStubs(j).filter(x=>x.id!==selfId);
+  let prior;
+  if(payDate){
+    const me={payDate,id:selfId!=null?selfId:Number.MAX_SAFE_INTEGER};
+    prior=list.filter(x=>stubCmp(x,me)<0).pop()||null;
+  } else if(selfId!=null){
+    const me=(j.stubs||[]).find(x=>x.id===selfId);
+    prior=me?list.filter(x=>stubCmp(x,me)<0).pop()||null:list.pop()||null;
+  } else prior=list.pop()||null;
+  if(!prior) return null;
+  const year=payDate?payDate.slice(0,4):String(new Date().getFullYear());
+  return stubKey(prior).slice(0,4)===year?prior:null; // new year: YTD starts over
+}
+function priorYtdOf(prior,sec,name){
+  if(!prior||!prior[sec]) return 0;
+  const row=prior[sec].find(r=>(r.name||r.plan)===name);
+  return row?(sec==="deductions"?row.eeYtd:row.ytd)||0:0;
+}
+// Re-point every row's "prior YTD" at the right earlier stub (call when the pay date changes),
+// and move the auto YTDs with it. Anything typed by hand stays as typed.
+function stSeedPrior(){
+  const j=S.jobs.find(x=>x.id===editing.jobId);
+  const prior=priorStubFor(j,F.payDate,editing.stubId);
+  F._priorId=prior?prior.id:null;
+  F.earnings.forEach(e=>{ e._pYtd=priorYtdOf(prior,"earnings",e.name); if(!e._ytdMan) e.ytd=r2(e._pYtd+(e.cur||0)); });
+  F.deductions.forEach(d=>{ d._pYtdEE=priorYtdOf(prior,"deductions",d.name); if(!d._eeyMan) d.eeYtd=r2(d._pYtdEE+(d.eeCur||0)); });
+  F.taxes.forEach(t=>{ t._pYtd=priorYtdOf(prior,"taxes",t.name); if(!t._ytdMan) t.ytd=r2(t._pYtd+(t.cur||0)); });
+}
+// Flat-dollar deductions (insurance, dues) vs a % of gross (401k). Guess from the name the
+// first time; after that the row remembers what you picked.
+const FLAT_DED=/insur|medical|dental|vision|life|disab|hsa|fsa|union|dues|parking|garnish|loan|uniform|accident|critical|hospital|legal|std\b|ltd\b|ad&d/i;
+function dedModeGuess(name){ return FLAT_DED.test(name||"")?"flat":"pct"; }
+
+// ---- unsaved paystub draft (survives the app being closed mid-entry) ----
+const DRAFT_KEY=KEY+"-stubDraft";
+function stHasData(f){
+  f=f||F; if(!f) return false;
+  return !!(f.start||f.end||f.payDate) ||
+    (f.earnings||[]).some(e=>(e.cur||0)>0||(e.hours||0)>0||(e.ytd||0)>0) ||
+    (f.deductions||[]).some(d=>(d.eeCur||0)>0||(d.eeYtd||0)>0) ||
+    (f.taxes||[]).some(t=>(t.cur||0)>0);
+}
+function stDraftSave(){
+  try{
+    if(!(editing&&editing.tab==="stub"&&F)) return;
+    if(!stHasData()){ localStorage.removeItem(DRAFT_KEY); return; }
+    const {scan,...rest}=F;
+    localStorage.setItem(DRAFT_KEY,JSON.stringify({jobId:editing.jobId,stubId:editing.stubId??null,at:Date.now(),F:rest}));
+  }catch(e){}
+}
+function stDraftClear(){ try{ localStorage.removeItem(DRAFT_KEY); }catch(e){} }
+function stDraftFor(jid,sid){
+  try{
+    const d=JSON.parse(localStorage.getItem(DRAFT_KEY)||"null");
+    if(d&&d.jobId===jid&&(d.stubId??null)===(sid??null)&&d.F&&Array.isArray(d.F.earnings)) return d;
+  }catch(e){}
+  return null;
+}
+function stTryDraft(jid,sid){
+  const d=stDraftFor(jid,sid);
+  if(!d) return false;
+  const when=new Date(d.at);
+  const label=fmtDate(when.toISOString().slice(0,10))+" "+when.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+  if(confirm(`You have an unsaved paystub from ${label}. Pick up where you left off?\n\nCancel starts fresh.`)){
+    F={ovr:{},...d.F};
+    renderSheet();
+    return true;
+  }
+  stDraftClear();
+  return false;
+}
+
 function openStub(jid){
   const j=S.jobs.find(x=>x.id===jid);
-  editing={tab:"stub",item:null,jobId:jid};
-  // most recent saved stub — used to seed prior YTD so this stub's YTD auto-adds
-  const last=(j.stubs||[]).slice().sort((a,b)=>(b.payDate||"").localeCompare(a.payDate||""))[0];
-  const priorYtd=(sec,name)=>{
-    if(!last||!last[sec]) return 0;
-    const row=last[sec].find(r=>(r.name||r.plan)===name);
-    return row?(sec==="earnings"?row.ytd:sec==="taxes"?row.ytd:row.eeYtd)||0:0;
-  };
+  editing={tab:"stub",item:null,jobId:jid,stubId:null};
+  if(stTryDraft(jid,null)) return;
   // if no stub history yet, seed earnings from the job's rates + labels using edit-field info
   let seedEarnings;
   if(j.earningTypes&&j.earningTypes.length){
-    seedEarnings=j.earningTypes.map(t=>({name:t.name,jobTitle:t.jobTitle||j.title||"",hours:0,rate:t.rate||0,cur:0,ytd:0,_pYtd:priorYtd("earnings",t.name)}));
+    seedEarnings=j.earningTypes.map(t=>({name:t.name,jobTitle:t.jobTitle||j.title||"",hours:0,rate:t.rate||0,cur:0,ytd:0}));
   } else {
     const src=[...(j.rates||[]),...(j.labelRates||[])].filter(r=>r.name);
-    seedEarnings=(src.length?src:[{name:"Regular",rate:0}]).map(r=>({name:r.name,jobTitle:j.title||"",hours:r.hours||0,rate:r.rate||0,cur:(r.rate||0)*(r.hours||0),ytd:0,_pYtd:priorYtd("earnings",r.name)}));
+    seedEarnings=(src.length?src:[{name:"Regular",rate:0}]).map(r=>({name:r.name,jobTitle:j.title||"",hours:r.hours||0,rate:r.rate||0,cur:r2((r.rate||0)*(r.hours||0)),ytd:0}));
   }
   F={
     start:"",end:"",payDate:"",
     earnings:seedEarnings,
-    deductions:(j.dedTypes||[]).map(t=>({name:t.name,pretax:t.pretax||"",eeCur:0,eeYtd:0,erCur:0,erYtd:0,_pEE:t.pctEE||0,_pER:t.pctER||0,_pYtdEE:priorYtd("deductions",t.name)})),
-    taxes:(j.taxTypes||[]).map(t=>({name:t.name,cur:0,ytd:0,_p:t.pct||0,_pYtd:priorYtd("taxes",t.name)})),
+    deductions:(j.dedTypes||[]).map(t=>{
+      const mode=t.mode||dedModeGuess(t.name);
+      return {name:t.name,pretax:t.pretax||"",mode,eeCur:0,eeYtd:0,erCur:0,erYtd:0,_pEE:t.pctEE||0,_pER:t.pctER||0,_fEE:t.flatEE||0,_fER:t.flatER||0};
+    }),
+    taxes:(j.taxTypes||[]).map(t=>({name:t.name,cur:0,ytd:0,_p:t.pct||0})),
     pto:(j.ptoPlans||[]).map(p=>({plan:p,taken:0,cur:0,bal:0})),
     ovr:{},
   };
+  stSeedPrior();
+  stAutofill();
   renderSheet();
+}
+// Open a saved stub for editing. Saved amounts are kept exactly; only boxes that were
+// auto-calculated (like hours x rate) keep recalculating while you edit.
+function editStub(jid,sid,from){
+  const j=S.jobs.find(x=>x.id===jid);
+  const st=j&&(j.stubs||[]).find(x=>x.id===sid);
+  if(!st) return;
+  if(!st.earnings){ alert("This is an older stub with only totals saved, so it can't be edited line by line. Delete it and enter it again instead."); return; }
+  editing={tab:"stub",item:null,jobId:jid,stubId:sid,from:from||""};
+  if(stTryDraft(jid,sid)) return;
+  const prior=priorStubFor(j,st.payDate,sid);
+  const near=(a,b)=>Math.abs((Number(a)||0)-(Number(b)||0))<0.005;
+  const dt=(j.dedTypes||[]);
+  F={
+    start:st.start||"",end:st.end||"",payDate:st.payDate||"",
+    earnings:(st.earnings||[]).map(e=>{ const p=priorYtdOf(prior,"earnings",e.name); return {...e,_pYtd:p,_curMan:!near(e.cur,(e.hours||0)*(e.rate||0)),_ytdMan:!near(e.ytd,p+(e.cur||0))}; }),
+    deductions:(st.deductions||[]).map(d=>{
+      const p=priorYtdOf(prior,"deductions",d.name), t=dt.find(x=>x.name===d.name)||{};
+      return {...d,mode:d.mode||t.mode||dedModeGuess(d.name),_pEE:t.pctEE||0,_pER:t.pctER||0,_fEE:d.eeCur||0,_fER:d.erCur||0,_pYtdEE:p,_eeMan:true,_erMan:true,_eeyMan:!near(d.eeYtd,p+(d.eeCur||0))};
+    }),
+    taxes:(st.taxes||[]).map(t=>{ const p=priorYtdOf(prior,"taxes",t.name); return {...t,_p:0,_pYtd:p,_man:true,_ytdMan:!near(t.ytd,p+(t.cur||0))}; }),
+    pto:(st.pto||[]).map(p=>({...p})),
+    ovr:{},
+  };
+  F._priorId=prior?prior.id:null;
+  // keep any summary box you had typed over
+  const calc0=stSum(), sum=st.summary||{};
+  ["gtw","tax","ded","net"].forEach(k=>{
+    if(sum.cur&&sum.cur[k]!=null&&!near(sum.cur[k],calc0.cur[k])) F.ovr["c_"+k]=sum.cur[k];
+    if(sum.ytd&&sum.ytd[k]!=null&&!near(sum.ytd[k],calc0.ytd[k])) F.ovr["y_"+k]=sum.ytd[k];
+  });
+  renderSheet();
+}
+// Period / pay dates on the stub sheet. A new pay date re-points YTD at the right older stub.
+function stField(k,v){
+  F[k]=v;
+  if(k==="payDate"){
+    stSeedPrior();
+    F.earnings.forEach((e,i)=>{ const el=document.getElementById(`se_ytd_${i}`); if(el&&!e._ytdMan) el.value=e.ytd; });
+    F.deductions.forEach((d,i)=>{ const el=document.getElementById(`sd_eey_${i}`); if(el&&!d._eeyMan) el.value=d.eeYtd; });
+    F.taxes.forEach((t,i)=>{ const el=document.getElementById(`st_ytd_${i}`); if(el&&!t._ytdMan) el.value=t.ytd; });
+    const h=document.getElementById("stPriorNote"); if(h) h.innerHTML=stPriorNote();
+    const pd=document.getElementById("f_payDate"); if(pd) pd.style.borderColor="";
+  }
+  stTotals();
+}
+function stPriorNote(){
+  const j=S.jobs.find(x=>x.id===editing.jobId);
+  const p=F._priorId!=null?(j.stubs||[]).find(x=>x.id===F._priorId):null;
+  if(p) return `YTD adds onto your stub paid ${p.payDate?fmtDate(p.payDate):"(no date)"}. Type over any YTD that doesn't match the paper.`;
+  return (j.stubs||[]).length?"First stub of the year, so YTD starts from this check.":"YTD starts from this check. Type over it if your stub shows more.";
 }
 
 // row templates for + buttons
@@ -987,16 +1146,24 @@ function stGross(){ return F.earnings.reduce((s,e)=>s+(e.cur||0),0); }
 function stAutofill(){
   const g=stGross();
   F.deductions.forEach(d=>{
-    if(!d._eeMan) d.eeCur=r2(g*(d._pEE||0));
-    if(!d._erMan) d.erCur=r2(g*(d._pER||0));
+    const flat=d.mode==="flat";
+    if(!d._eeMan) d.eeCur=flat?r2(d._fEE||0):r2(g*(d._pEE||0));
+    if(!d._erMan) d.erCur=flat?r2(d._fER||0):r2(g*(d._pER||0));
   });
   F.taxes.forEach(t=>{ if(!t._man) t.cur=r2(g*(t._p||0)); });
   stAutofillYtd();
 }
 function stSet(sec,i,k,v){
   const row=F[sec][i];
-  if(k==="name"||k==="jobTitle"||k==="pretax"||k==="plan") row[k]=v;
+  if(k==="name"||k==="jobTitle"||k==="pretax"||k==="plan"||k==="mode") row[k]=v;
   else row[k]=parseFloat(v)||0;
+  if(sec==="deductions"&&k==="mode"){
+    // keep today's amount as the new rule: a fixed $ or the matching % of this check
+    const g=stGross();
+    if(v==="flat"){ row._fEE=row.eeCur||0; row._fER=row.erCur||0; }
+    else if(g>0){ row._pEE=(row.eeCur||0)/g; row._pER=(row.erCur||0)/g; }
+    stTotals(); return;
+  }
   if(sec==="earnings"){
     if(k==="hours"||k==="rate"){ if(!row._curMan) row.cur=r2((row.hours||0)*(row.rate||0)); }
     if(k==="cur") row._curMan=true;
@@ -1048,34 +1215,49 @@ function stSum(){
   return {g,gY,hrs,eeDed,eeDedY,erDed,erDedY,tax,taxY,cur,ytd};
 }
 function stOvr(k,v){ if(v===""||v==null) delete F.ovr[k]; else F.ovr[k]=parseFloat(v)||0; stTotals(); }
+// Updates the totals in place. The summary boxes are only given new values, never rebuilt,
+// so the keyboard stays on the box you're typing in.
 function stTotals(){
-  const el=document.getElementById("stubTotals");
-  if(el) el.innerHTML=stubTotalsHTML();
-}
-function stubTotalsHTML(){
   const s=stSum();
-  const sumIn=(k,val)=>`<input type="number" step="0.01" inputmode="decimal" value="${val}" style="width:90px;text-align:right;padding:4px 6px;font-size:12px" oninput="stOvr('${k}',this.value)">`;
+  const k=document.getElementById("stubKrows"); if(k) k.innerHTML=stubKrowsHTML(s);
+  [["c","cur"],["y","ytd"]].forEach(([p,w])=>["gtw","tax","ded","net"].forEach(f=>{
+    const el=document.getElementById(`so_${p}_${f}`);
+    if(el&&el!==document.activeElement) el.value=s[w][f];
+  }));
+  const n=document.getElementById("stubNetLive"); if(n) n.textContent=fmt(s.cur.net);
+  stDraftSave();
+}
+function stubKrowsHTML(s){
   return `
     ${krow("Total hours",s.hrs.toFixed(2))}
     ${krow("Gross pay",fmt(s.g),"g",true,true)}
     ${krow("Employee deductions ("+(s.g?((s.eeDed/s.g)*100).toFixed(1):"0")+"% of gross)","−"+fmt(s.eeDed),"r")}
     ${krow("Employer deductions",fmt(s.erDed),"b")}
-    ${krow("Taxes ("+(s.g?((s.tax/s.g)*100).toFixed(1):"0")+"% of gross)","−"+fmt(s.tax),"r")}
-    <div class="sec" style="margin-top:12px">Plan summary <span style="text-transform:none;letter-spacing:0">(auto — edit any box to override)</span></div>
-    <div style="display:grid;grid-template-columns:60px 1fr 1fr 1fr 1fr;gap:6px;align-items:center;font-size:11px">
-      <span></span><span class="d">Gross taxable</span><span class="d">Taxes</span><span class="d">Deductions</span><span class="d">Net pay</span>
-      <span class="d">Current</span>${sumIn("c_gtw",s.cur.gtw)}${sumIn("c_tax",s.cur.tax)}${sumIn("c_ded",s.cur.ded)}${sumIn("c_net",s.cur.net)}
-      <span class="d">YTD</span>${sumIn("y_gtw",s.ytd.gtw)}${sumIn("y_tax",s.ytd.tax)}${sumIn("y_ded",s.ytd.ded)}${sumIn("y_net",s.ytd.net)}
-    </div>`;
+    ${krow("Taxes ("+(s.g?((s.tax/s.g)*100).toFixed(1):"0")+"% of gross)","−"+fmt(s.tax),"r")}`;
+}
+function stubTotalsHTML(){
+  const s=stSum();
+  const box=(p,f,lbl,w)=>`<label>${lbl}<input id="so_${p}_${f}" type="number" step="0.01" inputmode="decimal" value="${s[w][f]}" oninput="stOvr('${p}_${f}',this.value)"></label>`;
+  const col=(p,w,title)=>`<div class="col"><div class="d" style="font-size:11px;font-weight:700">${title}</div>${box(p,"gtw","Gross taxable",w)}${box(p,"tax","Taxes",w)}${box(p,"ded","Deductions",w)}${box(p,"net","Net pay",w)}</div>`;
+  return `
+    <div id="stubKrows">${stubKrowsHTML(s)}</div>
+    <div class="sec" style="margin-top:12px">Plan summary <span style="text-transform:none;letter-spacing:0">(auto, type over any box to match the paper)</span></div>
+    <div class="stsum">${col("c","cur","This check")}${col("y","ytd","Year to date")}</div>`;
 }
 
 function saveStub(){
   const j=S.jobs.find(x=>x.id===editing.jobId);
   const s=stSum();
   if(!(s.g>0)){ alert("Enter at least one earning with a current amount."); return; }
+  if(!F.payDate){
+    alert("Add the pay date first. Next stub's YTD builds on this one by pay date.");
+    const pd=document.getElementById("f_payDate"); if(pd){ pd.style.borderColor="var(--red)"; try{ pd.focus(); }catch(e){} }
+    return;
+  }
   const clean=o=>{const c={...o};Object.keys(c).forEach(k=>{if(k.startsWith("_"))delete c[k];});return c;};
+  const editId=editing.stubId??null;
   const stub={
-    id:Date.now(),start:F.start,end:F.end,payDate:F.payDate,
+    id:editId??Date.now(),start:F.start,end:F.end,payDate:F.payDate,
     earnings:F.earnings.filter(e=>e.name).map(clean),
     deductions:F.deductions.filter(d=>d.name).map(clean),
     taxes:F.taxes.filter(t=>t.name).map(clean),
@@ -1085,15 +1267,23 @@ function saveStub(){
     pct:s.g?r2(((s.g-s.cur.net)/s.g)*100):0,
   };
   checkpoint();
-  j.stubs=[stub,...(j.stubs||[])];
-  // learn saved options + percentages for future autofill (saved list = exactly this stub's rows)
-  j.earningTypes=stub.earnings.map(e=>({name:e.name,jobTitle:e.jobTitle,rate:e.rate}));
-  j.dedTypes=stub.deductions.map(d=>({name:d.name,pretax:d.pretax,pctEE:s.g?d.eeCur/s.g:0,pctER:s.g?d.erCur/s.g:0}));
-  j.taxTypes=stub.taxes.map(t=>({name:t.name,pct:s.g?t.cur/s.g:0}));
-  j.ptoPlans=stub.pto.map(p=>p.plan);
-  j.pct=stub.pct; // net-estimate rate for the job card
-  addLog({name:j.name+" paystub",action:"added",delta:stub.net});
+  if(editId!=null) j.stubs=(j.stubs||[]).map(x=>x.id===editId?stub:x);
+  else j.stubs=[stub,...(j.stubs||[])];
+  // learn saved options + amounts for future autofill, but only from the newest stub,
+  // so fixing an old stub doesn't change what the next one fills in
+  if(latestStub(j)===stub){
+    j.earningTypes=stub.earnings.map(e=>({name:e.name,jobTitle:e.jobTitle,rate:e.rate}));
+    j.dedTypes=stub.deductions.map(d=>({name:d.name,pretax:d.pretax,mode:d.mode||dedModeGuess(d.name),
+      pctEE:s.g?d.eeCur/s.g:0,pctER:s.g?d.erCur/s.g:0,flatEE:d.eeCur||0,flatER:d.erCur||0}));
+    j.taxTypes=stub.taxes.map(t=>({name:t.name,pct:s.g?t.cur/s.g:0}));
+    j.ptoPlans=stub.pto.map(p=>p.plan);
+    j.pct=stub.pct; // net-estimate rate for the job card
+  }
+  addLog({name:j.name+" paystub",action:editId!=null?"edited":"added",delta:stub.net});
+  const from=editing.from;
+  stDraftClear();
   persist(); closeSheet(); render();
+  if(from==="page"){ stubSelJob=j.id; stubSelId=stub.id; openStubsPage(j.id); }
 }
 function delStub(jid,sid){
   if(!confirm("Delete this stub from history?")) return;
@@ -1103,14 +1293,14 @@ function delStub(jid,sid){
 }
 function openHistory(jid){
   const j=S.jobs.find(x=>x.id===jid);
-  const rows=(j.stubs||[]).map(s=>{
+  const rows=sortedStubs(j).reverse().map(s=>{
     const hrs=s.hours!=null?` · ${Number(s.hours).toFixed(2)} hrs`:"";
     const items=s.earnings?`<div class="sub">${s.earnings.map(e=>esc(e.name)+" "+fmt(e.cur)).join(" · ")}</div>`:"";
     return `
     <div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">
       <div style="display:flex;justify-content:space-between;align-items:baseline">
         <span class="mono g" style="font-weight:700">${fmt(s.net)} net</span>
-        <button class="btn ghost" style="padding:3px 8px;font-size:11px" onclick="delStub(${jid},${s.id})">✕</button>
+        <span style="display:flex;gap:6px">${s.earnings?`<button class="btn ghost" style="padding:6px 10px;font-size:12px" onclick="editStub(${jid},${s.id})">Edit</button>`:""}<button class="btn ghost" style="padding:6px 10px;font-size:12px" onclick="delStub(${jid},${s.id})">✕</button></span>
       </div>
       <div class="sub">Gross ${fmt(s.gross)} · deductions+taxes ${s.pct}%${hrs}</div>
       ${items}
@@ -1457,11 +1647,12 @@ function closeSheet(){ editing=null; F=null; document.getElementById("sheetHost"
 // Guarded close: warns before discarding an in-progress paystub that has data.
 function tryCloseSheet(){
   if(editing&&editing.tab==="stub"&&F){
-    const hasData=(F.start||F.end||F.payDate) ||
-      (F.earnings||[]).some(e=>(e.cur||0)>0||(e.hours||0)>0||(e.ytd||0)>0) ||
-      (F.deductions||[]).some(d=>(d.eeCur||0)>0||(d.eeYtd||0)>0) ||
-      (F.taxes||[]).some(t=>(t.cur||0)>0);
-    if(hasData && !confirm("You haven't saved this paystub. Discard it and close?")) return;
+    if(stHasData() && !confirm(editing.stubId!=null?"Discard your changes to this paystub?":"You haven't saved this paystub. Discard it and close?")) return;
+    stDraftClear();
+    const from=editing.from, jid=editing.jobId;
+    closeSheet();
+    if(from==="page") openStubsPage(jid);
+    return;
   }
   closeSheet();
 }
@@ -1538,61 +1729,65 @@ function renderSheet(){
   let body="";
   if(t==="stub"){
     const j=S.jobs.find(x=>x.id===editing.jobId);
-    const num=(id,val,sec,i,k,lbl)=>`<label style="flex:1;min-width:64px;display:flex;flex-direction:column;gap:2px"><span style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim)">${lbl}</span><input id="${id}" type="number" step="0.01" inputmode="decimal" value="${val||""}" placeholder="0" style="width:100%;padding:7px 6px;font-size:13px" oninput="stSet('${sec}',${i},'${k}',this.value)"></label>`;
-    const txt=(val,sec,i,k,ph)=>`<input value="${esc(val)}" placeholder="${ph}" style="flex:1;min-width:0;padding:7px;font-size:13px" oninput="stSet('${sec}',${i},'${k}',this.value)">`;
-    const del=(sec,i)=>`<button onclick="stDel('${sec}',${i})" style="background:none;border:none;color:var(--dim);font-size:18px;width:26px;padding:0;align-self:center">×</button>`;
-    const head=cols=>``; // per-field labels now live on each input
+    const num=(id,val,sec,i,k,lbl)=>`<label><span>${lbl}</span><input id="${id}" type="number" step="0.01" inputmode="decimal" value="${val||""}" placeholder="0" oninput="stSet('${sec}',${i},'${k}',this.value)"></label>`;
+    const txt=(val,sec,i,k,ph)=>`<input value="${esc(val)}" placeholder="${ph}" style="flex:1;min-width:0" oninput="stSet('${sec}',${i},'${k}',this.value)">`;
+    const del=(sec,i)=>`<button class="stdel" aria-label="Remove row" onclick="stDel('${sec}',${i})">×</button>`;
 
     const earn=F.earnings.map((e,i)=>`
-      <div style="border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px">
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-          ${txt(e.name,"earnings",i,"name","Earning name")}
-          ${del("earnings",i)}
+      <div class="strow wide">
+        <div>
+          <div class="sthead">${txt(e.name,"earnings",i,"name","Earning name")}${del("earnings",i)}</div>
+          <div class="sthead" style="margin-bottom:0">${txt(e.jobTitle,"earnings",i,"jobTitle","Job title (optional)")}</div>
         </div>
-        ${txt(e.jobTitle,"earnings",i,"jobTitle","Job title (optional)")}
-        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+        <div class="stg c4" style="margin-top:6px">
           ${num("se_hrs_"+i,e.hours,"earnings",i,"hours","Hours")}
           ${num("se_rate_"+i,e.rate,"earnings",i,"rate","Rate")}
           ${num("se_cur_"+i,e.cur,"earnings",i,"cur","This check")}
-          ${num("se_ytd_"+i,e.ytd,"earnings",i,"ytd","YTD (auto)")}
+          ${num("se_ytd_"+i,e.ytd,"earnings",i,"ytd","YTD")}
         </div>
       </div>`).join("");
 
     const ded=F.deductions.map((d,i)=>`
-      <div style="border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px">
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-          ${txt(d.name,"deductions",i,"name","Deduction name")}
-          <select style="width:88px;flex:none;padding:7px 6px;font-size:12px" onchange="stSet('deductions',${i},'pretax',this.value)">
-            <option value="" ${!d.pretax?"selected":""}>—</option>
-            <option value="yes" ${d.pretax==="yes"?"selected":""}>Pretax</option>
-            <option value="no" ${d.pretax==="no"?"selected":""}>Post</option>
-          </select>
-          ${del("deductions",i)}
+      <div class="strow wide">
+        <div>
+          <div class="sthead">${txt(d.name,"deductions",i,"name","Deduction name")}${del("deductions",i)}</div>
+          <div class="sthead" style="margin-bottom:0">
+            <select style="flex:1;min-width:0" onchange="stSet('deductions',${i},'pretax',this.value)">
+              <option value="" ${!d.pretax?"selected":""}>Pretax?</option>
+              <option value="yes" ${d.pretax==="yes"?"selected":""}>Pretax</option>
+              <option value="no" ${d.pretax==="no"?"selected":""}>After tax</option>
+            </select>
+            <select style="flex:1;min-width:0" onchange="stSet('deductions',${i},'mode',this.value)">
+              <option value="pct" ${d.mode!=="flat"?"selected":""}>% of pay</option>
+              <option value="flat" ${d.mode==="flat"?"selected":""}>Same $ each check</option>
+            </select>
+          </div>
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          ${num("sd_ee_"+i,d.eeCur,"deductions",i,"eeCur","You (cur)")}
-          ${num("sd_eey_"+i,d.eeYtd,"deductions",i,"eeYtd","You YTD (auto)")}
+        <div class="stg c4" style="margin-top:6px">
+          ${num("sd_ee_"+i,d.eeCur,"deductions",i,"eeCur","You, this check")}
+          ${num("sd_eey_"+i,d.eeYtd,"deductions",i,"eeYtd","You, YTD")}
           ${num("sd_er_"+i,d.erCur,"deductions",i,"erCur","Employer")}
-          ${num("sd_ery_"+i,d.erYtd,"deductions",i,"erYtd","Emp YTD")}
+          ${num("sd_ery_"+i,d.erYtd,"deductions",i,"erYtd","Employer YTD")}
         </div>
       </div>`).join("");
 
     const tax=F.taxes.map((x,i)=>`
-      <div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:8px">
-        ${txt(x.name,"taxes",i,"name","Tax name")}
-        ${num("st_cur_"+i,x.cur,"taxes",i,"cur","This check")}
-        ${num("st_ytd_"+i,x.ytd,"taxes",i,"ytd","YTD (auto)")}
-        ${del("taxes",i)}
+      <div class="strow wide">
+        <div class="sthead">${txt(x.name,"taxes",i,"name","Tax name")}${del("taxes",i)}</div>
+        <div class="stg">
+          ${num("st_cur_"+i,x.cur,"taxes",i,"cur","This check")}
+          ${num("st_ytd_"+i,x.ytd,"taxes",i,"ytd","YTD")}
+        </div>
       </div>`).join("");
-    const OLD_TAX_MARKER=1;
 
     const pto=F.pto.map((p,i)=>`
-      <div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:8px">
-        ${txt(p.plan,"pto",i,"plan","Plan (e.g. Vacation)")}
-        ${num("sp_tk_"+i,p.taken,"pto",i,"taken","Taken")}
-        ${num("sp_cur_"+i,p.cur,"pto",i,"cur","This check")}
-        ${num("sp_bal_"+i,p.bal,"pto",i,"bal","Balance")}
-        ${del("pto",i)}
+      <div class="strow wide">
+        <div class="sthead">${txt(p.plan,"pto",i,"plan","Plan (e.g. Vacation)")}${del("pto",i)}</div>
+        <div class="stg c3">
+          ${num("sp_tk_"+i,p.taken,"pto",i,"taken","Taken")}
+          ${num("sp_cur_"+i,p.cur,"pto",i,"cur","Earned")}
+          ${num("sp_bal_"+i,p.bal,"pto",i,"bal","Balance")}
+        </div>
       </div>`).join("");
 
     body=`
@@ -1600,13 +1795,13 @@ function renderSheet(){
       <button class="btn ghost" style="width:100%;margin-bottom:8px" onclick="scanFromStub()">📷 Scan a stub (camera / photo / PDF)</button>
       <div class="hint" style="width:100%">${esc(j.name)} — copy the stub line by line. Deductions &amp; taxes autofill from your last stub once earnings are entered; type over anything that's off. Saved rows carry to the next stub (delete a row here to drop it as an option).</div>
       <div style="display:flex;gap:10px;width:100%">
-        ${fld("Period start","f_start","date",F.start,`onchange="fSet('start',this.value)"`)}
-        ${fld("Period end","f_end","date",F.end,`onchange="fSet('end',this.value)"`)}
-        ${fld("Pay date","f_payDate","date",F.payDate,`onchange="fSet('payDate',this.value)"`)}
+        ${fld("Period start","f_start","date",F.start,`onchange="stField('start',this.value)"`)}
+        ${fld("Period end","f_end","date",F.end,`onchange="stField('end',this.value)"`)}
+        ${fld("Pay date (needed)","f_payDate","date",F.payDate,`onchange="stField('payDate',this.value)"`)}
       </div>
       <div style="width:100%">
         <div class="sec">Earnings</div>
-        <div class="hint" style="margin-bottom:6px">YTD fills in automatically from your last stub + this check. Type over it if your stub shows something different.</div>
+        <div class="hint" id="stPriorNote" style="margin-bottom:6px">${stPriorNote()}</div>
         ${earn}
         <button class="btn ghost" style="padding:5px 10px;font-size:12px" onclick="stAdd('earnings')">+ Earning</button>
 
@@ -1623,7 +1818,6 @@ function renderSheet(){
         <button class="btn ghost" style="padding:5px 10px;font-size:12px" onclick="stAdd('pto')">+ PTO plan</button>
 
         <div id="stubTotals" style="margin-top:12px">${stubTotalsHTML()}</div>
-        <div style="height:40vh"></div>
       </div>`;
   } else {
     body=fld("Name","f_name","text",F.name,`oninput="fSet('name',this.value)"`);
@@ -1730,6 +1924,25 @@ function renderSheet(){
       </div>
       <div class="hint" style="margin-top:6px">Type an amount, tap + or −. Hit Save to keep it.</div>
     </div>`;
+  }
+  if(t==="stub"){
+    const net=fmt(stSum().cur.net);
+    document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)tryCloseSheet()">
+      <div class="sheet centered stubsheet">
+        <h3>${editing.stubId!=null?"Edit":"Enter"} paystub</h3>
+        <div class="frm">${body}</div>
+        <div class="stbar">
+          <div><div class="lbl">Net pay</div><div class="net mono g" id="stubNetLive">${net}</div></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn ghost" onclick="tryCloseSheet()">Cancel</button>
+            <button class="btn" onclick="saveStub()">${editing.stubId!=null?"Save changes":"Save stub"}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+    stDraftSave();
+    return;
   }
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)tryCloseSheet()">
@@ -2172,7 +2385,7 @@ function scanApplyStub(rows){
     if(r) used.add(r);
     return r||null;
   };
-  if(p.start) F.start=p.start; if(p.end) F.end=p.end; if(p.payDate) F.payDate=p.payDate;
+  if(p.start) F.start=p.start; if(p.end) F.end=p.end; if(p.payDate){ F.payDate=p.payDate; stSeedPrior(); }
   if(p.earnings.length){
     p.earnings.forEach(e=>{
       let row=take(F.earnings,"name",e.name);
@@ -3116,7 +3329,7 @@ function openStubsPage(jid){
   const withStubs=S.jobs.filter(j=>(j.stubs||[]).length);
   if(stubSelJob==null || !S.jobs.find(j=>j.id===stubSelJob&&(j.stubs||[]).length)) stubSelJob=withStubs.length?withStubs[0].id:null;
   const j=S.jobs.find(x=>x.id===stubSelJob);
-  if(j && (!stubSelId || !j.stubs.find(s=>s.id===stubSelId))) stubSelId=j.stubs.length?j.stubs[0].id:null;
+  if(j && (!stubSelId || !j.stubs.find(s=>s.id===stubSelId))) stubSelId=j.stubs.length?latestStub(j).id:null;
   renderStubsPage();
 }
 function stubsJobSel(v){ stubSelJob=parseFloat(v); stubSelId=null; openStubsPage(); }
@@ -3126,7 +3339,7 @@ function renderStubsPage(){
   const j=S.jobs.find(x=>x.id===stubSelJob);
   const stub=j?j.stubs.find(s=>s.id===stubSelId):null;
   const jobOpts=withStubs.map(x=>`<option value="${x.id}" ${x.id===stubSelJob?"selected":""}>${esc(x.name)}${x.archived?" (archived)":""}</option>`).join("");
-  const dateOpts=j?j.stubs.map(s=>`<option value="${s.id}" ${s.id===stubSelId?"selected":""}>${s.payDate?fmtDate(s.payDate):(s.end?("period end "+fmtDate(s.end)):"undated")}</option>`).join(""):"";
+  const dateOpts=j?sortedStubs(j).reverse().map(s=>`<option value="${s.id}" ${s.id===stubSelId?"selected":""}>${s.payDate?fmtDate(s.payDate):(s.end?("period end "+fmtDate(s.end)):"undated")}</option>`).join(""):"";
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
       <div class="sheet centered">
@@ -3140,6 +3353,7 @@ function renderStubsPage(){
         :'<div class="hint">No pay stubs saved yet. Enter one from Budget → Jobs.</div>'}
         <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
           ${stub?`<button class="btn danger" onclick="delStubFromPage(${j.id},${stub.id})">Delete stub</button>`:""}
+          ${stub&&stub.earnings?`<button class="btn ghost" onclick="editStub(${j.id},${stub.id},'page')">Edit</button>`:""}
           <button class="btn ghost" onclick="closeSheet()">Close</button>
         </div>
       </div>
