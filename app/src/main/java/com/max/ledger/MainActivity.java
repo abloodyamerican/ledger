@@ -720,22 +720,31 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> startScan(source));
         }
 
-        // ---------- Claude (Analyze) ----------
-        // The API key goes in once and is never handed back to the page: only whether one is set
+        // ---------- AI for Analyze: Claude or Hermes ----------
+        // Keys go in once and are never handed back to the page: only whether one is set
         // and its last 4 characters.
 
-        /** {"set":bool,"tail":"abcd","model":"..."} */
+        /** {"provider":"claude|hermes","claude":{set,tail,model},"hermes":{set,tail,url}} */
         @JavascriptInterface
-        public String aiKeyStatus() {
+        public String aiStatus() {
             try {
                 AiKeyStore ks = new AiKeyStore(MainActivity.this);
-                boolean set = ks.has();
-                return new JSONObject().put("set", set).put("tail", set ? ks.tail() : "")
-                        .put("model", ClaudeAdvisor.MODEL).toString();
-            } catch (Exception e) { return "{\"set\":false}"; }
+                boolean c = ks.has(AiKeyStore.CLAUDE), h = ks.has(AiKeyStore.HERMES);
+                return new JSONObject().put("provider", ks.provider())
+                        .put("claude", new JSONObject().put("set", c).put("tail", c ? ks.tail(AiKeyStore.CLAUDE) : "")
+                                .put("model", ClaudeAdvisor.MODEL))
+                        .put("hermes", new JSONObject().put("set", h && !ks.hermesUrl().isEmpty())
+                                .put("tail", h ? ks.tail(AiKeyStore.HERMES) : "").put("url", ks.hermesUrl()))
+                        .toString();
+            } catch (Exception e) { return "{\"provider\":\"claude\"}"; }
         }
 
-        /** Saves the key (encrypted, this phone only). Returns false if it doesn't look like an Anthropic key. */
+        @JavascriptInterface
+        public void aiSetProvider(String p) {
+            new AiKeyStore(MainActivity.this).setProvider(p);
+        }
+
+        /** Saves the Claude key (encrypted, this phone only). False if it doesn't look like an Anthropic key. */
         @JavascriptInterface
         public boolean aiSetKey(String key) {
             return new AiKeyStore(MainActivity.this).set(key);
@@ -746,19 +755,41 @@ public class MainActivity extends Activity {
             new AiKeyStore(MainActivity.this).clear();
         }
 
-        /** Sends the budget summary to Claude. Answers via window.ledgerAIResult(ok, text). */
+        /** Saves the Hermes address and key (key blank = keep the saved one). Returns "" or what's wrong. */
+        @JavascriptInterface
+        public String aiSetHermes(String url, String key) {
+            AiKeyStore ks = new AiKeyStore(MainActivity.this);
+            String bad = HermesAdvisor.checkUrl(url);
+            if (!bad.isEmpty()) return bad;
+            boolean newKey = key != null && !key.trim().isEmpty();
+            if (!newKey && !ks.has(AiKeyStore.HERMES)) return "Add the key you set as API_SERVER_KEY in Hermes.";
+            if (newKey && key.trim().length() < 8) return "That key looks too short.";
+            ks.setHermes(url.trim(), key);
+            return "";
+        }
+
+        @JavascriptInterface
+        public void aiClearHermes() {
+            new AiKeyStore(MainActivity.this).clearHermes();
+        }
+
+        /** Sends the budget summary to the chosen AI. Answers via window.ledgerAIResult(ok, text). */
         @JavascriptInterface
         public void askAI(final String budgetJson) {
             if (aiBusy) return;
-            final String key = new AiKeyStore(MainActivity.this).get();
-            if (key == null) {
-                aiReply(false, "No Claude API key saved yet.");
+            final AiKeyStore ks = new AiKeyStore(MainActivity.this);
+            final boolean hermes = "hermes".equals(ks.provider());
+            final String key = ks.getSecret(hermes ? AiKeyStore.HERMES : AiKeyStore.CLAUDE);
+            final String url = ks.hermesUrl();
+            if (key == null || (hermes && url.isEmpty())) {
+                aiReply(false, hermes ? "Hermes isn't set up yet." : "No Claude API key saved yet.");
                 return;
             }
             aiBusy = true;
+            final String json = budgetJson == null ? "{}" : budgetJson;
             aiExec.execute(() -> {
                 try {
-                    ClaudeAdvisor.Result r = ClaudeAdvisor.ask(key, budgetJson == null ? "{}" : budgetJson);
+                    ClaudeAdvisor.Result r = hermes ? HermesAdvisor.ask(url, key, json) : ClaudeAdvisor.ask(key, json);
                     aiReply(r.ok, r.text);
                 } finally {
                     aiBusy = false;

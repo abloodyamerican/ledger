@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hermes on your own computer is reached over Tailscale (already encrypted) or home Wi-Fi,
+     usually as plain http. HermesAdvisor only allows private addresses (100.64.0.0/10,
+     *.ts.net, 10.x, 172.16-31.x, 192.168.x); everything else, like Claude, uses https. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

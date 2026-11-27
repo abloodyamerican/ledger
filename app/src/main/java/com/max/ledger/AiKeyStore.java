@@ -15,7 +15,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 /**
- * Keeps the Claude API key on this phone only. It is encrypted with a key held in the
+ * Keeps the AI keys (Claude API key, Hermes API server key) on this phone only. It is encrypted with a key held in the
  * Android Keystore (which never leaves the device), lives in its own prefs file that is
  * excluded from cloud backup and device transfer, and is never handed back to the page.
  */
@@ -23,7 +23,6 @@ final class AiKeyStore {
 
     private static final String PREFS = "ledger_ai";   // excluded in backup_rules / data_extraction_rules
     private static final String ALIAS = "ledger_ai_key";
-    private static final String FIELD = "k";
 
     private final Context ctx;
 
@@ -35,32 +34,53 @@ final class AiKeyStore {
         return k != null && k.trim().matches("sk-ant-[A-Za-z0-9_\\-]{20,}");
     }
 
+    // Claude key ("k") and Hermes key ("h") are encrypted; the chosen AI and the Hermes
+    // address are plain settings in the same backup-excluded file.
+    static final String CLAUDE = "k", HERMES = "h";
+
     boolean has() { return get() != null; }
+    String tail() { return tail(CLAUDE); }
+    boolean set(String key) { return looksLikeKey(key) && setSecret(CLAUDE, key); }
+    void clear() { prefs().edit().remove(CLAUDE).commit(); }
+    String get() { return getSecret(CLAUDE); }
+
+    boolean has(String field) { return getSecret(field) != null; }
 
     /** Last 4 characters, for "Key ending in …abcd". */
-    String tail() {
-        String k = get();
-        return k == null ? "" : k.substring(k.length() - 4);
+    String tail(String field) {
+        String k = getSecret(field);
+        return k == null || k.length() < 4 ? "" : k.substring(k.length() - 4);
     }
 
-    boolean set(String key) {
-        if (!looksLikeKey(key)) return false;
+    String provider() {
+        String p = prefs().getString("provider", "claude");
+        return "hermes".equals(p) ? "hermes" : "claude";
+    }
+    void setProvider(String p) { prefs().edit().putString("provider", "hermes".equals(p) ? "hermes" : "claude").commit(); }
+
+    String hermesUrl() { return prefs().getString("hermesUrl", ""); }
+    void setHermes(String url, String key) {
+        SharedPreferences.Editor e = prefs().edit().putString("hermesUrl", url);
+        e.commit();
+        if (key != null && !key.trim().isEmpty()) setSecret(HERMES, key);
+    }
+    void clearHermes() { prefs().edit().remove("hermesUrl").remove(HERMES).commit(); }
+
+    boolean setSecret(String field, String value) {
         try {
             Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
             c.init(Cipher.ENCRYPT_MODE, secret());
-            byte[] ct = c.doFinal(key.trim().getBytes(StandardCharsets.UTF_8));
+            byte[] ct = c.doFinal(value.trim().getBytes(StandardCharsets.UTF_8));
             String v = Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP);
-            return prefs().edit().putString(FIELD, v).commit();
+            return prefs().edit().putString(field, v).commit();
         } catch (Exception e) {
             return false;
         }
     }
 
-    void clear() { prefs().edit().remove(FIELD).commit(); }
-
-    /** The key, or null if none is saved or it can't be read on this phone. */
-    String get() {
-        String v = prefs().getString(FIELD, null);
+    /** The secret, or null if none is saved or it can't be read on this phone. */
+    String getSecret(String field) {
+        String v = prefs().getString(field, null);
         if (v == null) return null;
         try {
             String[] p = v.split(":", 2);

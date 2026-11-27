@@ -24,7 +24,7 @@ final class ClaudeAdvisor {
 
     static final String MODEL = "claude-opus-5-5";
 
-    private static final String SYSTEM =
+    static final String SYSTEM =
             "You are a practical personal budgeting coach inside a phone budgeting app called Ledger. "
             + "The user sends a JSON summary of their monthly budget: income range (lean and full month take-home), "
             + "bills with minimums and what they budget, credit cards with balances, APRs and limits, "

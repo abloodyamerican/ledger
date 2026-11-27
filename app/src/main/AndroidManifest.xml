@@ -3,7 +3,7 @@
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- only used when you tap "Ask Claude" on the Analyze screen -->
+    <!-- only used when you ask Claude or Hermes on the Analyze screen -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- lets the app find a camera app for "Take a photo" on Android 11+ -->
@@ -19,6 +19,7 @@
         android:allowBackup="true"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:enableOnBackInvokedCallback="true"
         android:theme="@android:style/Theme.Black.NoTitleBar">
 

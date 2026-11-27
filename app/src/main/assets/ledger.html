@@ -2955,11 +2955,11 @@ function analyzeBudget(){
   const body=recs.length?recs.join("<br><br>"):"Everything looks balanced — no red flags in your current budget.";
   const ai=aiInfo();
   const last=S.aiLast&&S.aiLast.text?S.aiLast:null;
-  const aiPart=!ai?`<div class="hint" style="margin-top:12px">Asking Claude for deeper advice works in the installed app.</div>`
-    :`<button class="btn" style="margin-top:14px" onclick="askAIBudget()">🤖 Ask Claude for deeper advice</button>
+  const aiPart=!ai?`<div class="hint" style="margin-top:12px">Asking Claude or Hermes for deeper advice works in the installed app.</div>`
+    :`<button class="btn" style="margin-top:14px" onclick="askAIBudget()">🤖 Ask ${aiName(ai.provider)} for deeper advice</button>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:12px">
-        ${last?`<a href="#" onclick="event.preventDefault();aiShowAnswer(S.aiLast.text,S.aiLast.at)">View last answer (${esc(aiWhen(last.at))})</a>`:""}
-        <a href="#" onclick="event.preventDefault();aiKeySheet()">${ai.set?`Claude key …${esc(ai.tail)}`:"Set up Claude"}</a>
+        ${last?`<a href="#" onclick="event.preventDefault();aiShowAnswer(S.aiLast.text,S.aiLast.at,true,S.aiLast.by)">View last answer (${esc(aiWhen(last.at))})</a>`:""}
+        <a href="#" onclick="event.preventDefault();openAISettings('analyze')">Change AI</a>
       </div>`;
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
@@ -2971,16 +2971,21 @@ function analyzeBudget(){
       </div>
     </div>`;
 }
-// ---------- Ask Claude (Analyze) ----------
-// The API key lives in the Android app (encrypted, this phone only). The page can save or
-// remove it but never read it back: aiKeyStatus() only says whether one is set and its last 4.
-let aiWaiting=false, aiTimer=null;
+// ---------- Ask an AI (Analyze): Claude or Hermes, chosen in Settings ----------
+// Keys live in the Android app (encrypted, this phone only). The page can save or remove
+// them but never read them back: aiStatus() only says whether each is set and its last 4.
+let aiWaiting=false, aiTimer=null, aiFrom="analyze";
 function aiInfo(){
   try{
-    if(typeof window==="undefined"||!window.Android||!window.Android.aiKeyStatus||!window.Android.askAI) return null;
-    return JSON.parse(window.Android.aiKeyStatus())||{set:false};
+    if(typeof window==="undefined"||!window.Android||!window.Android.aiStatus||!window.Android.askAI) return null;
+    const j=JSON.parse(window.Android.aiStatus())||{};
+    j.provider=j.provider==="hermes"?"hermes":"claude";
+    j.claude=j.claude||{set:false}; j.hermes=j.hermes||{set:false};
+    return j;
   }catch(e){ return null; }
 }
+const aiName=p=>p==="hermes"?"Hermes":"Claude";
+function aiReady(ai){ return !!(ai&&ai[ai.provider]&&ai[ai.provider].set); }
 function aiWhen(at){
   const d=new Date(at); if(isNaN(d)) return "";
   return d.toLocaleDateString(undefined,{month:"short",day:"numeric"});
@@ -2991,19 +2996,48 @@ function aiSheet(inner){
       <div class="menu" style="padding:16px;max-height:82vh;overflow-y:auto">${inner}</div>
     </div>`;
 }
+function aiBack(){ if(aiFrom==="settings") openAISettings("settings"); else analyzeBudget(); }
+// Settings > AI for Analyze
+function openAISettings(from){
+  if(from) aiFrom=from;
+  const ai=aiInfo();
+  if(!ai){ aiSheet(`<div style="font-weight:700;font-size:15px;margin-bottom:8px">AI for Analyze</div>
+    <div class="hint">Choosing an AI works in the installed app.</div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="openSettings()">← Back</button></div>`); return; }
+  const row=(p,title,sub,status)=>`
+    <button style="display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left" onclick="aiPick('${p}')">
+      <span><b>${title}</b><br><span class="hint">${sub}</span></span>
+      <span class="${ai.provider===p?"g":"d"}" style="white-space:nowrap">${ai.provider===p?"✓ In use":"Use"}</span>
+    </button>
+    <div style="font-size:12px;margin:2px 0 10px 4px">${status}</div>`;
+  aiSheet(`
+    <div style="font-weight:700;font-size:15px;margin-bottom:6px">AI for Analyze</div>
+    <div class="hint" style="margin-bottom:10px">The Analyze screen asks this AI for deeper advice. It always shows you what gets sent first.</div>
+    ${row("claude","Claude","Anthropic's cloud. Uses your own API key; a few cents per ask.",
+      ai.claude.set?`Key ends in …${esc(ai.claude.tail)} · <a href="#" onclick="event.preventDefault();aiKeySheet()">Change</a>`:`<a href="#" onclick="event.preventDefault();aiKeySheet()">Add your API key</a>`)}
+    ${row("hermes","Hermes","Your own computer, over Tailscale or home Wi-Fi. The computer has to be on.",
+      ai.hermes.set?`${esc(ai.hermes.url)} · <a href="#" onclick="event.preventDefault();aiHermesSheet()">Change</a>`:`<a href="#" onclick="event.preventDefault();aiHermesSheet()">Set up Hermes</a>`)}
+    <div style="display:flex;justify-content:space-between;margin-top:6px"><button class="btn ghost" style="width:auto" onclick="aiFrom==='analyze'?analyzeBudget():openSettings()">← Back</button><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>`);
+}
+function aiPick(p){
+  try{ window.Android.aiSetProvider(p); }catch(e){}
+  const ai=aiInfo();
+  if(ai&&!aiReady(ai)){ if(p==="hermes") aiHermesSheet(); else aiKeySheet(); return; }
+  openAISettings();
+}
 function aiKeySheet(err){
   const ai=aiInfo(); if(!ai) return;
   aiSheet(`
     <div style="font-weight:700;font-size:15px;margin-bottom:8px">Claude API key</div>
     <div style="font-size:13px;line-height:1.5">Ledger asks Claude with your own Anthropic API key, so each answer is billed to your Anthropic account (usually a few cents). Make a key at console.anthropic.com under API keys.</div>
     <div class="hint" style="margin-top:8px">The key is encrypted and stays on this phone. It isn't in Ledger's backups or snapshots, and Ledger never shows it again.</div>
-    ${ai.set?`<div style="font-size:13px;margin-top:10px">Saved key ends in <b>…${esc(ai.tail)}</b>.</div>`:""}
-    <label class="fld" style="margin-top:10px"><span>${ai.set?"Replace with a new key":"API key"}</span>
+    ${ai.claude.set?`<div style="font-size:13px;margin-top:10px">Saved key ends in <b>…${esc(ai.claude.tail)}</b>.</div>`:""}
+    <label class="fld" style="margin-top:10px"><span>${ai.claude.set?"Replace with a new key":"API key"}</span>
       <input id="aiKeyIn" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-ant-…"></label>
     ${err?`<div style="color:var(--red);font-size:12px;margin-top:6px">${esc(err)}</div>`:""}
     <div style="display:flex;gap:8px;margin-top:14px">
-      ${ai.set?`<button class="btn ghost" style="flex:1" onclick="aiRemoveKey()">Remove key</button>`:""}
-      <button class="btn ghost" style="flex:1" onclick="analyzeBudget()">Back</button>
+      ${ai.claude.set?`<button class="btn ghost" style="flex:1" onclick="aiRemoveKey()">Remove key</button>`:""}
+      <button class="btn ghost" style="flex:1" onclick="openAISettings()">Back</button>
       <button class="btn" style="flex:1" onclick="aiSaveKey()">Save</button>
     </div>`);
 }
@@ -3013,12 +3047,47 @@ function aiSaveKey(){
   let ok=false; try{ ok=window.Android.aiSetKey(v); }catch(e){}
   if(el) el.value="";
   if(!ok){ aiKeySheet("That doesn't look like an Anthropic API key. It starts with sk-ant-."); return; }
-  aiConfirmSheet();
+  try{ window.Android.aiSetProvider("claude"); }catch(e){}
+  aiAfterSetup();
 }
 function aiRemoveKey(){
   try{ window.Android.aiClearKey(); }catch(e){}
-  banner="Claude key removed from this phone"; closeSheet(); render();
+  banner="Claude key removed from this phone"; openAISettings(); render();
 }
+function aiHermesSheet(err,url){
+  const ai=aiInfo(); if(!ai) return;
+  const h=ai.hermes;
+  aiSheet(`
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Hermes on your computer</div>
+    <div style="font-size:13px;line-height:1.5">Ledger talks to Hermes through its API server. In Hermes, turn on the API server (API_SERVER_ENABLED=true), set API_SERVER_KEY, and let it listen on the computer's Tailscale address (API_SERVER_HOST). The default port is 8642.</div>
+    <label class="fld" style="margin-top:10px"><span>Address</span>
+      <input id="aiHUrl" type="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://100.x.x.x:8642" value="${esc(url!=null?url:(h.url||""))}"></label>
+    <label class="fld" style="margin-top:8px"><span>${h.set?`Key (saved, ends in …${esc(h.tail)}; leave blank to keep)`:"API server key"}</span>
+      <input id="aiHKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+    <div class="hint" style="margin-top:8px">Only Tailscale or home network addresses work, so your budget never goes over the open internet. The key is encrypted on this phone and kept out of backups.</div>
+    ${err?`<div style="color:var(--red);font-size:12px;margin-top:6px">${esc(err)}</div>`:""}
+    <div style="display:flex;gap:8px;margin-top:14px">
+      ${h.set?`<button class="btn ghost" style="flex:1" onclick="aiRemoveHermes()">Remove</button>`:""}
+      <button class="btn ghost" style="flex:1" onclick="openAISettings()">Back</button>
+      <button class="btn" style="flex:1" onclick="aiSaveHermes()">Save</button>
+    </div>`);
+}
+function aiSaveHermes(){
+  const u=document.getElementById("aiHUrl"), k=document.getElementById("aiHKey");
+  const url=(u&&u.value||"").trim(), key=(k&&k.value||"").trim();
+  if(k) k.value="";
+  if(!url){ aiHermesSheet("Add the computer's address first.",url); return; }
+  let err="Couldn't save."; try{ err=window.Android.aiSetHermes(url,key); }catch(e){}
+  if(err){ aiHermesSheet(err,url); return; }
+  try{ window.Android.aiSetProvider("hermes"); }catch(e){}
+  aiAfterSetup();
+}
+function aiRemoveHermes(){
+  try{ window.Android.aiClearHermes(); }catch(e){}
+  banner="Hermes settings removed from this phone"; openAISettings(); render();
+}
+// after a key is saved: back to Analyze's confirm step if that's where we came from
+function aiAfterSetup(){ if(aiFrom==="ask") aiConfirmSheet(); else openAISettings(); }
 function aiSnapshot(){
   const c=calc();
   const cat=a=>(a||[]).map(m=>({name:m.name,budget:m.budget||0,spent:m.spent||0}));
@@ -3043,16 +3112,17 @@ function aiSendList(){
 }
 function askAIBudget(){
   const ai=aiInfo();
-  if(!ai){ alert("Asking Claude works in the installed app."); return; }
-  if(!ai.set){ aiKeySheet(); return; }
+  if(!ai){ alert("Asking an AI works in the installed app."); return; }
+  if(!aiReady(ai)){ aiFrom="ask"; if(ai.provider==="hermes") aiHermesSheet(); else aiKeySheet(); return; }
   aiConfirmSheet();
 }
 function aiConfirmSheet(){
+  const ai=aiInfo(); const who=aiName(ai&&ai.provider);
   aiSheet(`
-    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Send your budget to Claude?</div>
-    <div style="font-size:13px;line-height:1.5">Claude gets:</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Send your budget to ${who}?</div>
+    <div style="font-size:13px;line-height:1.5">${who} gets:</div>
     <ul style="font-size:13px;line-height:1.5;margin:6px 0 0 18px;padding:0">${aiSendList().map(x=>`<li>${x}</li>`).join("")}</ul>
-    <div class="hint" style="margin-top:8px">No account numbers, paystubs or notes. Billed to your Anthropic account, usually a few cents.</div>
+    <div class="hint" style="margin-top:8px">No account numbers, paystubs or notes. ${who==="Hermes"?`Goes to ${esc(ai.hermes.url)} on your own computer.`:"Billed to your Anthropic account, usually a few cents."}</div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="btn ghost" style="flex:1" onclick="analyzeBudget()">Cancel</button>
       <button class="btn" style="flex:1" onclick="aiSend()">Send</button>
@@ -3060,20 +3130,22 @@ function aiConfirmSheet(){
 }
 function aiSend(){
   if(aiWaiting) return aiWaitingSheet();
-  aiWaiting=true;
+  const ai=aiInfo();
+  aiWaiting=aiName(ai&&ai.provider);
   aiWaitingSheet();
   clearTimeout(aiTimer);
-  aiTimer=setTimeout(()=>{ if(aiWaiting) window.ledgerAIResult(false,"Claude took too long to answer. Try again."); },180000);
+  aiTimer=setTimeout(()=>{ if(aiWaiting) window.ledgerAIResult(false,aiWaiting+" took too long to answer. Try again."); },300000);
   try{ window.Android.askAI(JSON.stringify(aiSnapshot())); }
   catch(e){ window.ledgerAIResult(false,"Couldn't start the request."); }
 }
 function aiWaitingSheet(){
+  const who=aiWaiting||"the AI";
   aiSheet(`
-    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Asking Claude…</div>
-    <div style="font-size:13px;line-height:1.5">This usually takes under a minute. You can close this; the answer will be under Analyze.</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Asking ${who}…</div>
+    <div style="font-size:13px;line-height:1.5">This can take a minute${who==="Hermes"?" or two":""}. You can close this; the answer will be under Analyze.</div>
     <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>`);
 }
-// Claude's text, escaped, with **bold** and "- " lines kept
+// the AI's text, escaped, with **bold** and "- " lines kept
 function aiFormat(text){
   return String(text||"").split(/\n/).map(line=>{
     let h=esc(line.trim()).replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>");
@@ -3082,9 +3154,10 @@ function aiFormat(text){
     return `<div style="margin:0 0 8px">${h}</div>`;
   }).join("");
 }
-function aiShowAnswer(text,at,ok){
+function aiShowAnswer(text,at,ok,by){
+  const who=by||"Claude";
   aiSheet(`
-    <div style="font-weight:700;font-size:15px;margin-bottom:10px">${ok===false?"Claude couldn't answer":"Claude's advice"}</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:10px">${ok===false?`${esc(who)} couldn't answer`:`${esc(who)}'s advice`}</div>
     <div style="font-size:13px;line-height:1.55">${aiFormat(text)}</div>
     ${ok===false?"":`<div class="hint" style="margin-top:6px">${at?esc(aiWhen(at))+" · ":""}Advice, not a guarantee. Check the numbers before acting.</div>`}
     <div style="display:flex;gap:8px;margin-top:14px">
@@ -3093,11 +3166,12 @@ function aiShowAnswer(text,at,ok){
     </div>`);
 }
 window.ledgerAIResult=function(ok,text){
-  const shown=aiWaiting && !!document.querySelector("#sheetHost .overlay");
+  const who=aiWaiting||"The AI";
+  const shown=!!aiWaiting && !!document.querySelector("#sheetHost .overlay");
   aiWaiting=false; clearTimeout(aiTimer);
-  if(ok){ S.aiLast={at:new Date().toISOString(),text:String(text||"")}; persist(); }
-  if(shown) aiShowAnswer(text, ok?S.aiLast.at:null, ok);
-  else { banner=ok?"Claude's answer is ready under Analyze":"Claude couldn't answer: "+String(text||""); render(); }
+  if(ok){ S.aiLast={at:new Date().toISOString(),text:String(text||""),by:who}; persist(); }
+  if(shown) aiShowAnswer(text, ok?S.aiLast.at:null, ok, who);
+  else { banner=ok?`${who}'s answer is ready under Analyze`:`${who} couldn't answer: `+String(text||""); render(); }
 };
 function subMenu(title,opts){
   document.getElementById("sheetHost").innerHTML=`
@@ -3377,6 +3451,7 @@ function openSettings(){
         </button>
         <button onclick="openNotifSettings()">🔔 &nbsp;Notifications ${st.notif?'<span class="g">On</span>':'<span class="d">Off</span>'}</button>
         <button onclick="openBackup()">💾 &nbsp;Backup &amp; restore</button>
+        ${aiInfo()?`<button onclick="openAISettings('settings')">🤖 &nbsp;AI for Analyze <span class="b">${aiName(aiInfo().provider)}</span></button>`:""}
         ${hasSnapshot()?`<button onclick="openSnapshot()">☁️ &nbsp;Budget snapshot ${snapInfo().on?'<span class="g">On</span>':'<span class="d">Off</span>'}</button>`:""}
         <button class="r" onclick="openDanger()">⚠️ &nbsp;Danger zone</button>
         <button class="d" onclick="closeSheet()">Close</button>
