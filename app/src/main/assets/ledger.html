@@ -139,6 +139,7 @@ const SEED = {
   log: [],
   notified: {},
   carryAsk: [],
+  history: [],
 };
 
 // ---------- helpers ----------
@@ -153,31 +154,75 @@ const titleCase = s => String(s??"").trim().split(/\s+/).map(w=>{
   return w.charAt(0).toUpperCase()+w.slice(1).toLowerCase();
 }).join(" ");
 const monthKeyNow = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); };
-const dayKey = () => new Date().toISOString().slice(0,10);
+// local calendar date as YYYY-MM-DD (toISOString is UTC, which turned evenings into tomorrow)
+const ymd = d => d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+const dayKey = () => ymd(new Date());
+const mkOf = d => d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+const addMonthsKey = (k,n) => { const [y,m]=k.split("-").map(Number); return mkOf(new Date(y,m-1+n,1)); };
+const daysIn = (y,m) => new Date(y,m+1,0).getDate();
+// day N of a month, pulled back to the month's last day when it's shorter (a bill due the
+// 31st falls on Nov 30 and Feb 28). m may run past 11; Date rolls it into the next year.
+const onDay = (y,m,day) => { const f=new Date(y,m,1,12); return new Date(f.getFullYear(),f.getMonth(),Math.min(day,daysIn(f.getFullYear(),f.getMonth())),12); };
+const today0 = () => { const t=new Date(); t.setHours(0,0,0,0); return t; };
+const dayDiff = (a,b) => Math.round((new Date(a).setHours(0,0,0,0)-new Date(b).setHours(0,0,0,0))/86400000);
+const monthNameOf = (k,opt) => new Date(k+"-15T12:00").toLocaleDateString("en-US",opt||{month:"long",year:"numeric"});
 const todayDay = new Date().getDate();
 const ord = n => n + (["st","nd","rd"][((n+90)%100-10)%10-1]||"th");
 const fmtDate = s => s ? new Date(s+"T12:00").toLocaleDateString("en-US",{month:"numeric",day:"numeric",year:"2-digit"}) : "";
-function nextPayday(a){ if(!a) return null; const d=new Date(a+"T12:00"); const now=new Date(); now.setHours(0,0,0,0); while(d<now) d.setDate(d.getDate()+14); return d; }
 const FREQ_DAYS={weekly:7,biweekly:14,semimonthly:15,monthly:30};
-function nextPaydayFreq(anchor,freq){
+// Twice a month is two fixed days, not every 15 days. The first payday you set is one of
+// them; the other is the day you pick, or the usual partner (1st & 15th, 15th & last day).
+// 31 means the last day of the month.
+function semiPayDays(anchorDay,day2){
+  const a=anchorDay>=28?31:anchorDay;
+  let b=Math.round(Number(day2)||0);
+  if(!(b>=1&&b<=31)||b===a||(b>=28&&a===31)) b=a===1?15:a===15?31:a===31?15:a<15?a+15:a-15;
+  if(b>=28) b=31;
+  return [Math.min(a,b),Math.max(a,b)];
+}
+// The first payday on or after the day `from`, at midnight (so "today" counts as 0 days).
+function paydayOnOrAfter(anchor,freq,day2,from){
   if(!anchor) return null;
+  const a=new Date(anchor+"T12:00"); if(isNaN(a)) return null;
+  const f=new Date(from); f.setHours(0,0,0,0);
+  let d=null;
+  if(freq==="monthly"||freq==="semimonthly"){
+    // monthly keeps the anchor's day (Jan 31 → Feb 28 → Mar 31), never drifting
+    const days=freq==="monthly"?[a.getDate()]:semiPayDays(a.getDate(),day2);
+    let y=a.getFullYear(), m=a.getMonth();
+    if(f>a){ y=f.getFullYear(); m=f.getMonth()-1; }
+    for(let i=0;i<40&&!d;i++,m++) for(const day of days){ const c=onDay(y,m,day); if(c>=a&&c>=f){ d=c; break; } }
+  } else {
+    const step=FREQ_DAYS[freq]||14;
+    d=new Date(a);
+    if(d<f){ const n=Math.floor((f-d)/86400000/step); d.setDate(d.getDate()+n*step); }
+    while(d<f) d.setDate(d.getDate()+step);
+  }
+  if(!d) return null;
+  d.setHours(0,0,0,0); return d;
+}
+const nextDay=d=>new Date(d.getFullYear(),d.getMonth(),d.getDate()+1);
+function nextPaydayFreq(anchor,freq,day2){ return paydayOnOrAfter(anchor,freq,day2,new Date()); }
+function nextPayday(a){ return paydayOnOrAfter(a,"biweekly",0,new Date()); }
+// the payday right before `pd` (start of the period that pd pays for)
+function paydayBefore(anchor,freq,day2,pd){
   const step=FREQ_DAYS[freq]||14;
-  const d=new Date(anchor+"T12:00"); const now=new Date(); now.setHours(0,0,0,0);
-  if(freq==="monthly"){ while(d<now){ d.setMonth(d.getMonth()+1); } return d; }
-  if(freq==="semimonthly"){ while(d<now){ d.setDate(d.getDate()+15); } return d; }
-  while(d<now) d.setDate(d.getDate()+step);
-  return d;
+  if(freq!=="monthly"&&freq!=="semimonthly"){ const d=new Date(pd); d.setDate(d.getDate()-step); return d; }
+  let x=paydayOnOrAfter(anchor,freq,day2,new Date(pd.getFullYear(),pd.getMonth(),pd.getDate()-40)), last=null, g=0;
+  while(x&&x<pd&&g++<10){ last=x; x=paydayOnOrAfter(anchor,freq,day2,nextDay(x)); }
+  if(last) return last;
+  const d=new Date(pd); d.setDate(d.getDate()-step); return d;
 }
 // soonest upcoming payday across all active jobs (falls back to global anchor)
 function soonestPayday(){
   const cands=[];
-  S.jobs.filter(j=>!j.archived&&j.payAnchor).forEach(j=>{ const p=nextPaydayFreq(j.payAnchor,j.freq); if(p) cands.push({date:p,job:j}); });
+  S.jobs.filter(j=>!j.archived&&j.payAnchor).forEach(j=>{ const p=nextPaydayFreq(j.payAnchor,j.freq,j.payDay2); if(p) cands.push({date:p,job:j}); });
   if(!cands.length){ const p=nextPayday(S.payAnchor); return p?{date:p,job:null}:null; }
   cands.sort((a,b)=>a.date-b.date);
   return cands[0];
 }
 function allJobPaydays(){
-  return S.jobs.filter(j=>!j.archived&&j.payAnchor).map(j=>({job:j,date:nextPaydayFreq(j.payAnchor,j.freq)})).filter(x=>x.date).sort((a,b)=>a.date-b.date);
+  return S.jobs.filter(j=>!j.archived&&j.payAnchor).map(j=>({job:j,date:nextPaydayFreq(j.payAnchor,j.freq,j.payDay2)})).filter(x=>x.date).sort((a,b)=>a.date-b.date);
 }
 const VALUE_FIELD = { monthly:"debt", credit:"debt", cash:"amt", invest:"amt" };
 
@@ -185,6 +230,49 @@ const VALUE_FIELD = { monthly:"debt", credit:"debt", cash:"amt", invest:"amt" };
 let S, tab="budget", editing=null, F=null, banner="", backupStatus="", activeAlerts=[];
 
 const isObj=x=>!!x&&typeof x==="object"&&!Array.isArray(x);
+// ---------- the bill cycle ----------
+// The month the bills stand for. Usually the calendar month; after an early "Start next
+// month" it's the month you started, until the calendar catches up.
+function liveCycleKey(d){ d=d||S; const mk=monthKeyNow(); return d&&d.cycleKey&&d.cycleKey>mk?d.cycleKey:mk; }
+function cycleStart(off){ const [y,m]=liveCycleKey().split("-").map(Number); return new Date(y,m-1+(off||0),1,12); }
+const cycleAhead=()=>liveCycleKey()>monthKeyNow();
+// the date a "due on day N" bill falls on in the month starting at base (clamped to month end)
+function billDateIn(b,base){ return onDay(base.getFullYear(),base.getMonth(),b.due); }
+// days until this cycle's due date (negative = overdue)
+function billDaysLeft(b){ return dayDiff(billDateIn(b,cycleStart(0)),new Date()); }
+// ---------- month snapshots ----------
+// Each month close keeps a small record: spending by category, bills, balances, net worth
+// and income from that month's paystubs. About 1–2 KB a month.
+function incomeFor(d,key){
+  let g=0,n=0,c=0;
+  (d.jobs||[]).forEach(j=>(j.stubs||[]).forEach(st=>{ if(st&&typeof st.payDate==="string"&&st.payDate.slice(0,7)===key){ g+=Number(st.gross)||0; n+=Number(st.net)||0; c++; } }));
+  return {g:c2(g),n:c2(n),c};
+}
+function monthSnapshot(d,key,how){
+  const sum=(a,f)=>c2((a||[]).reduce((t,x)=>t+(Number(f(x))||0),0));
+  const cats=[]; CARRY_CATS.forEach(k=>(d[k]||[]).forEach(m=>cats.push({k,id:m.id,n:m.name||"",b:c2(m.budget),s:c2(m.spent),ci:carryIn(m)})));
+  const bills=(d.monthly||[]).map(b=>({id:b.id,n:b.name||"",a:c2(payAmt(b)),p:!!b.paid,an:b.fromAnnual?1:0}));
+  const cash=sum(d.cash,a=>a.amt), sav=sum((d.cash||[]).filter(a=>a.savings),a=>a.amt), inv=sum(d.invest,a=>a.amt);
+  const cc=sum(d.credit,c=>c.debt), loan=sum((d.monthly||[]).filter(b=>(b.debt||0)>0&&!b.link),b=>b.debt);
+  return {key,at:Date.now(),how,cats,bills,cash,sav,inv,debt:c2(cc+loan),nw:c2(cash+inv-cc-loan),inc:incomeFor(d,key)};
+}
+function saveMonthSnap(d,snap){
+  const h=(Array.isArray(d.history)?d.history:[]).filter(x=>isObj(x)&&x.key!==snap.key);
+  h.push(snap); h.sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+  d.history=h.slice(-240);
+}
+// Paid annual bills come back unpaid for next year once their date has passed.
+function rollAnnual(d){
+  const t=today0(); let n=0;
+  (d.annual||[]).forEach(ab=>{
+    if(ab.recur===false||!ab.paid||typeof ab.date!=="string") return;
+    const [y,m,dd]=ab.date.split("-").map(Number); if(!y||!m||!dd) return;
+    if(onDay(y,m-1,dd)>=t) return;
+    let ny=y; while(onDay(ny,m-1,dd)<t&&ny<y+100) ny++;
+    ab.lastPaid=ab.date; ab.date=ymd(onDay(ny,m-1,dd)); ab.paid=false; n++;
+  });
+  return n;
+}
 const LIST_KEYS=Object.keys(SEED).filter(k=>Array.isArray(SEED[k]));
 function migrate(d){
   const base=JSON.parse(JSON.stringify(SEED));
@@ -212,28 +300,31 @@ function migrate(d){
   // catching up must not reset it again (that wiped bills paid and spending logged since)
   const startedEarly=!!d.cycleKey&&d.cycleKey>=mk;
   if(d.monthKey && d.monthKey!==mk && startedEarly){
-    d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===mk);
+    d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===(d.cycleKey>mk?d.cycleKey:mk));
   } else if(d.monthKey && d.monthKey!==mk){
+    // the cycle being closed: the month you started early, if you did, else last calendar month
+    const closing=d.cycleKey&&d.cycleKey>d.monthKey?d.cycleKey:d.monthKey;
+    try{ saveMonthSnap(d,monthSnapshot(d,closing,"calendar")); }catch(e){}
     d.monthly=d.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
     // last month's auto-added annual bills don't carry into the new month
     d.monthly=d.monthly.filter(b=>!b.fromAnnual||b.forMonth===mk);
-    const carried=carryRollover(d,d.monthKey);
+    const carried=carryRollover(d,closing);
     banner="New month — bills unchecked, spending budgets reset"+(carried?", overspending carried over":"");
   }
   d.monthKey=mk;
   if(d.cycleKey&&!(d.cycleKey>mk)) delete d.cycleKey;  // calendar has caught up with the cycle
+  rollAnnual(d);
   return d;
 }
 // An annual bill whose due date lands in the current month gets mirrored into the
 // monthly list for that month, so it shows up alongside everything else that's due.
 function syncAnnualToMonthly(){
-  const mk=monthKeyNow();
-  const now=new Date();
+  const mk=liveCycleKey();
   let added=0;
   (S.annual||[]).forEach(ab=>{
-    if(!ab.date) return;
+    if(!ab.date||ab.date.slice(0,7)!==mk) return;
+    if(ab.noMirror===mk) return;  // you removed it from this month's bills
     const d=new Date(ab.date+"T12:00");
-    if(d.getFullYear()!==now.getFullYear()||d.getMonth()!==now.getMonth()) return;
     const already=S.monthly.some(b=>b.fromAnnual===ab.id&&b.forMonth===mk);
     if(already) return;
     S.monthly.push({...BLANK.monthly,id:Date.now()+Math.random(),name:ab.name,due:d.getDate(),
@@ -453,8 +544,11 @@ function calc(){
   const mTotal=S.monthly.reduce((s,b)=>s+eff(b),0);
   const mLeft=S.monthly.filter(b=>!b.paid).reduce((s,b)=>s+eff(b),0);
   const mDebt=S.monthly.reduce((s,b)=>s+(b.debt||0),0);
-  const aTotal=S.annual.reduce((s,b)=>s+b.amt,0);
-  const aLeft=S.annual.filter(b=>!b.paid).reduce((s,b)=>s+b.amt,0);
+  // annual bills for this calendar year: paid ones that already rolled to next year still count
+  const yNow=String(new Date().getFullYear());
+  const aThisYear=b=>(b.date||"").slice(0,4)===yNow||(!!b.lastPaid&&b.lastPaid.slice(0,4)===yNow&&(b.date||"")>yNow);
+  const aTotal=S.annual.filter(aThisYear).reduce((s,b)=>s+(b.amt||0),0);
+  const aLeft=S.annual.filter(b=>!b.paid&&(b.date||"").slice(0,4)<=yNow).reduce((s,b)=>s+(b.amt||0),0);
   const iTotal=S.invest.reduce((s,b)=>s+b.amt,0);
   const cashTotal=S.cash.reduce((s,b)=>s+b.amt,0);
   const savingsTotal=S.cash.filter(b=>b.savings).reduce((s,b)=>s+b.amt,0);
@@ -470,17 +564,16 @@ function calc(){
   const payday=paydayInfo?paydayInfo.date:null;
   const now=new Date(); now.setHours(0,0,0,0);
   const daysToPay=payday?Math.round((payday-now)/86400000):null;
-  // The next calendar date a "due on day N" bill actually falls on, on/after today.
-  const off=S.viewMonthOffset||0;
-  // The month the bills currently represent.
-  const cycleBase=new Date(now.getFullYear(),now.getMonth()+off,1);
+  // The month the bills currently represent (the live cycle, not the month being previewed).
+  const cycleBase=cycleStart(0);
   // Bills due on/before payday for the active cycle.
   // - An UNPAID bill counts at its due date in this cycle even if that date has already
   //   passed (it's overdue but still owed — it belongs in "due before payday").
   // - A PAID bill is done for this cycle, so its next occurrence is next month.
   const dueBefore=payday?S.monthly.filter(b=>b.due>0).map(b=>{
-    let d=new Date(cycleBase.getFullYear(),cycleBase.getMonth(),b.due);
-    if(b.paid) d=new Date(cycleBase.getFullYear(),cycleBase.getMonth()+1,b.due);
+    let d=billDateIn(b,cycleBase);
+    if(b.paid) d=billDateIn(b,new Date(cycleBase.getFullYear(),cycleBase.getMonth()+1,1));
+    d.setHours(0,0,0,0);
     return {bill:b,when:d};
   }).filter(x=>x.when<=payday).map(x=>x.bill):[];
   const dueBeforeTotal=dueBefore.reduce((s,b)=>s+eff(b),0);
@@ -530,8 +623,9 @@ function calc(){
     const daysInMonth=new Date(yr,mo+1,0).getDate();
     const periodDays=({weekly:7,biweekly:14,semimonthly:daysInMonth/2,monthly:daysInMonth})[j.freq]||14;
     let remainingPeriods=0;
-    const pd=j.payAnchor?nextPaydayFreq(j.payAnchor,j.freq):nextPayday(S.payAnchor);
-    if(pd){ let d=new Date(pd); while(d.getFullYear()===yr&&d.getMonth()===mo){ remainingPeriods++; d=new Date(d); d.setDate(d.getDate()+periodDays); } }
+    const pd=j.payAnchor?nextPaydayFreq(j.payAnchor,j.freq,j.payDay2):nextPayday(S.payAnchor);
+    if(pd){ const an=j.payAnchor||S.payAnchor, fq=j.payAnchor?j.freq:"biweekly"; let d=pd, g=0;
+      while(d&&d.getFullYear()===yr&&d.getMonth()===mo&&g++<40){ remainingPeriods++; d=paydayOnOrAfter(an,fq,j.payDay2,nextDay(d)); } }
     else { const totalP=Math.round(per/12); remainingPeriods=Math.max(0,totalP-paidThisMonth.length); }
     const monthActualNet=paidThisMonth.reduce((s,st)=>s+(st.net||0),0);
     const monthActualGross=paidThisMonth.reduce((s,st)=>s+(st.gross||0),0);
@@ -559,16 +653,17 @@ function calc(){
   const allBillsPaid=S.monthly.length>0 && S.monthly.every(b=>b.paid);
   // is there any remaining payday still inside the current calendar month?
   let paydayLeftThisMonth=false;
+  const cyc=cycleStart(0);
   S.jobs.filter(j=>!j.archived&&j.payAnchor).forEach(j=>{
-    const p=nextPaydayFreq(j.payAnchor,j.freq);
-    if(p && p.getMonth()===now.getMonth() && p.getFullYear()===now.getFullYear()) paydayLeftThisMonth=true;
+    const p=nextPaydayFreq(j.payAnchor,j.freq,j.payDay2);
+    if(p && p.getMonth()===cyc.getMonth() && p.getFullYear()===cyc.getFullYear()) paydayLeftThisMonth=true;
   });
   const monthSettled=allBillsPaid && !paydayLeftThisMonth && S.monthly.length>0;
   // If settled, "due this month" rolls forward to next month's full bill run.
   const nextMonthBills=S.monthly.filter(b=>!b.fromAnnual).reduce((s,b)=>s+eff(b),0)
-    + S.annual.filter(b=>{ if(!b.date) return false; const d=new Date(b.date+"T12:00"); const nm=new Date(now.getFullYear(),now.getMonth()+1,1); return d.getFullYear()===nm.getFullYear()&&d.getMonth()===nm.getMonth(); }).reduce((s,b)=>s+b.amt,0);
+    + S.annual.filter(b=>{ if(!b.date) return false; const d=new Date(b.date+"T12:00"); const nm=new Date(cyc.getFullYear(),cyc.getMonth()+1,1); return d.getFullYear()===nm.getFullYear()&&d.getMonth()===nm.getMonth(); }).reduce((s,b)=>s+b.amt,0);
   const dueThisMonth = monthSettled ? nextMonthBills : mLeft;
-  const dueLabel = monthSettled ? "Coming next month" : "Total due this month";
+  const dueLabel = monthSettled ? "Coming next month" : cycleAhead() ? "Total due in "+monthNameOf(liveCycleKey(),{month:"long"}) : "Total due this month";
   const totalDebt=ccDebt+loanDebt;
   // ----- yearly spending estimate -----
   const now3=new Date(); const curMonth=now3.getMonth(); // 0=Jan
@@ -603,15 +698,14 @@ function collectAlerts(){
   S.cash.filter(a=>Number(a.minKeep||0)>0&&a.amt<Number(a.minKeep)).forEach(a=>out.push({key:"low-"+a.id,title:"Account low",body:`${a.name} is at ${fmt(a.amt)} (below its ${fmt(a.minKeep)} minimum)`}));
   S.credit.filter(c=>c.limit>0&&(c.debt/c.limit)*100>=st.ccPct).forEach(c=>out.push({key:"cc-"+c.id,title:"Card usage high",body:`${c.name} is at ${((c.debt/c.limit)*100).toFixed(0)}% of its limit (${fmt(c.debt)} / ${fmtShort(c.limit)})`}));
   const now=new Date(); now.setHours(0,0,0,0);
-  const vOff=S.viewMonthOffset||0;
-  const cycleBase=new Date(now.getFullYear(),now.getMonth()+vOff,1);
+  // always the live cycle: previewing a future month doesn't change what's due
+  const cycleBase=cycleStart(0);
   S.monthly.filter(b=>!b.paid&&b.due>0&&!b.fromAnnual).forEach(b=>{
-    // this bill's date in the cycle currently being viewed
-    const dd=new Date(cycleBase.getFullYear(),cycleBase.getMonth(),b.due);
-    const diff=Math.round((dd-now)/86400000);
-    if(diff>=0&&diff<=st.dueDays) out.push({key:"bill-"+b.id,title:"Bill due "+(diff===0?"today":"in "+diff+" day"+(diff>1?"s":"")),body:`${b.name} — ${fmt(payAmt(b))} due the ${ord(b.due)}`});
-    // overdue only counts in the live current month; never while browsing a future cycle
-    else if(vOff===0 && diff<0) out.push({key:"late-"+b.id,title:"Bill overdue",body:`${b.name} was due the ${ord(b.due)} — ${fmt(payAmt(b))}`});
+    const dd=billDateIn(b,cycleBase);
+    const diff=dayDiff(dd,now);
+    const on=ord(dd.getDate());
+    if(diff>=0&&diff<=st.dueDays) out.push({key:"bill-"+b.id,title:"Bill due "+(diff===0?"today":"in "+diff+" day"+(diff>1?"s":"")),body:`${b.name} — ${fmt(payAmt(b))} due the ${on}`});
+    else if(diff<0) out.push({key:"late-"+b.id,title:"Bill overdue",body:`${b.name} was due the ${on} — ${fmt(payAmt(b))}`});
   });
   S.annual.filter(b=>!b.paid&&b.date).forEach(b=>{
     const dd=new Date(b.date+"T12:00"); dd.setHours(0,0,0,0);
@@ -631,25 +725,28 @@ function collectAlerts(){
   return out;
 }
 function buildSchedule(){
-  // upcoming bill-due alerts for the next 35 days, for the native daily alarm
+  // upcoming bill-due alerts for the next 35 days, for the native daily alarm.
+  // Each bill's due date comes from the bill cycle: this cycle's date is skipped once the
+  // bill is paid, and dates before the cycle (a month you already closed) never remind.
   const out=[]; const st=S.settings;
-  const now=new Date(); now.setHours(0,0,0,0);
-  const push=(dt,t,b)=>{ out.push({d:dt.toISOString().slice(0,10),t,b}); };
-  for(let off=0;off<=35;off++){
-    const day=new Date(now); day.setDate(day.getDate()+off);
-    S.monthly.filter(x=>x.due>0&&!(off===0&&x.paid)).forEach(x=>{
-      const dd=new Date(day.getFullYear(),day.getMonth(),x.due);
-      const diff=Math.round((dd-day)/86400000);
-      if(diff>=0&&diff<=st.dueDays&&dd.getMonth()===day.getMonth())
-        push(day,"Bill due "+(diff===0?"today":"in "+diff+" day"+(diff>1?"s":"")),x.name+" — "+fmt(payAmt(x)));
-    });
-    S.annual.filter(x=>!x.paid&&x.date).forEach(x=>{
-      const dd=new Date(x.date+"T12:00"); dd.setHours(0,0,0,0);
-      const diff=Math.round((dd-day)/86400000);
-      if(diff>=0&&diff<=st.dueDays)
-        push(day,"Annual bill due "+(diff===0?"today":"in "+diff+" days"),x.name+" — "+fmt(x.amt));
-    });
-  }
+  const today=today0(), end=new Date(today); end.setDate(end.getDate()+35);
+  const lead=Math.max(0,Math.min(31,Math.round(Number(st.dueDays)||0)));
+  const push=(day,t,b)=>{ if(day>=today&&day<=end) out.push({d:ymd(day),t,b}); };
+  const remind=(due,label,body)=>{ for(let diff=lead;diff>=0;diff--){ const day=new Date(due); day.setDate(day.getDate()-diff); push(day,label+" "+(diff===0?"today":"in "+diff+" day"+(diff>1?"s":"")),body); } };
+  const cyc=cycleStart(0);
+  // mirrored annual bills remind once, from the Annual list
+  S.monthly.filter(x=>x.due>0&&!x.fromAnnual).forEach(x=>{
+    for(let k=0;k<=2;k++){
+      if(k===0&&x.paid) continue;
+      const due=billDateIn(x,new Date(cyc.getFullYear(),cyc.getMonth()+k,1)); due.setHours(0,0,0,0);
+      remind(due,"Bill due",x.name+" — "+fmt(payAmt(x)));
+    }
+  });
+  S.annual.filter(x=>!x.paid&&x.date).forEach(x=>{
+    const due=new Date(x.date+"T12:00"); due.setHours(0,0,0,0);
+    remind(due,"Annual bill due",x.name+" — "+fmt(x.amt));
+  });
+  out.sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:0);
   return out.slice(0,150);
 }
 function checkAlerts(){
@@ -700,10 +797,21 @@ function settingChange(k,v){ S.settings[k]=(v==="true"||v===true)?true:(v==="fal
 // ---------- actions ----------
 function setTab(t){ tab=t; render(); }
 function dismissBanner(){ banner=""; render(); }
+// A mirrored annual bill and its Annual entry are the same bill: paying one pays the other.
+function syncAnnualPaid(key,id){
+  if(key==="monthly"){
+    const m=S.monthly.find(x=>x.id===id); if(!m||!m.fromAnnual) return;
+    S.annual=S.annual.map(a=>a.id===m.fromAnnual?{...a,paid:!!m.paid}:a);
+  } else if(key==="annual"){
+    const a=S.annual.find(x=>x.id===id); if(!a) return;
+    S.monthly=S.monthly.map(m=>m.fromAnnual===id?{...m,paid:!!a.paid}:m);
+  }
+}
 function togglePaid(key,id){
   checkpoint();
   const item=S[key].find(x=>x.id===id);
   S[key]=S[key].map(x=>x.id===id?{...x,paid:!x.paid}:x);
+  syncAnnualPaid(key,id);
   addLog({name:item.name,action:item.paid?"unpaid":"paid",delta:item.paid?0:-payAmt(item),cat:key});
   persist(); checkAlerts(); render();
 }
@@ -713,17 +821,17 @@ function resetMonthBills(){ if(confirm("Uncheck all monthly bills?")){ checkpoin
 // It's a checkpointed action, so "previous month" is just undo — but we also give an
 // explicit back button that steps the label and re-checks nothing (a fresh cycle).
 function monthLabelFor(offset){
-  const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()+offset);
-  return d.toLocaleDateString("en-US",{month:"long",year:"numeric"});
+  return cycleStart(offset).toLocaleDateString("en-US",{month:"long",year:"numeric"});
 }
 function advanceMonth(){
   autoBackup("month-close");
   checkpoint();
+  // the cycle being closed, and the month the new one stands for
+  const closing=liveCycleKey();
+  saveMonthSnap(S,monthSnapshot(S,closing,"early"));
   S.monthly=S.monthly.map(b=>({...b,paid:false,schedAmt:0,schedDate:""}));
   // auto-added annual bills from the old month don't carry forward
   S.monthly=S.monthly.filter(b=>!b.fromAnnual);
-  // the cycle being closed, and the month the new one stands for
-  const closing=S.cycleKey||monthKeyNow();
   carryRollover(S,closing);
   { const [y,m]=closing.split("-").map(Number); const n=new Date(y,m,1); S.cycleKey=n.getFullYear()+"-"+String(n.getMonth()+1).padStart(2,"0"); }
   S.viewMonthOffset=0;  // the new cycle becomes the working "current" view
@@ -948,7 +1056,7 @@ function delJob(id){
   const j=S.jobs.find(x=>x.id===id);
   if(confirm(`Delete "${j.name}" and its ${j.stubs.length} saved stub(s)?`)){ checkpoint(); S.jobs=S.jobs.filter(x=>x.id!==id); persist(); render(); }
 }
-function jobField(id,k,v){ S.jobs=S.jobs.map(j=>j.id===id?{...j,[k]:k==="pct"?(parseFloat(v)||0):v}:j); persist(); if(k==="pct") softHdr(); }
+function jobField(id,k,v){ S.jobs=S.jobs.map(j=>j.id===id?{...j,[k]:k==="pct"?(parseFloat(v)||0):k==="payDay2"?(Math.round(parseFloat(v))||0):v}:j); persist(); if(k==="pct") softHdr(); if(k==="freq"||k==="payAnchor") openJobEdit(id); }
 function jobEditDone(id){ S.jobs=S.jobs.map(j=>j.id!==id?j:{...j,name:titleCase(j.name),title:titleCase(j.title||"")}); persist(); closeSheet(); render(); }
 function jobRateField(jid,rid,k,v){
   S.jobs=S.jobs.map(j=>j.id!==jid?j:{...j,rates:j.rates.map(r=>r.id===rid?{...r,[k]:k==="name"?v:(parseFloat(v)||0)}:r)});
@@ -1626,7 +1734,7 @@ function openSnapshot(){
 // ---------- edit sheet ----------
 const BLANK={
   monthly:{name:"",due:1,minAmt:0,amt:0,paid:false,debt:0,apr:0,note:"",link:"",acct:"",schedAmt:0,schedDate:"",url:"",hcat:"",janStart:false},
-  annual:{name:"",date:new Date().getFullYear()+"-01-01",amt:0,paid:false,url:""},
+  annual:{name:"",date:new Date().getFullYear()+"-01-01",amt:0,paid:false,url:"",recur:true},
   invest:{name:"",apy:0,amt:0,goal:1000,link:"",url:""},
   cash:{name:"",tag:"",amt:0,apy:0,link:"",savings:false,minKeep:0,last4:"",l4type:"account",url:""},
   credit:{name:"",limit:0,debt:0,apr:0,note:"",link:"",last4:"",url:""},
@@ -1717,6 +1825,11 @@ function saveSheet(){
 }
 function delSheet(){
   checkpoint();
+  const gone=editing.item;
+  if(editing.tab==="monthly"&&gone.fromAnnual){
+    S.annual=S.annual.map(a=>a.id===gone.fromAnnual?{...a,noMirror:gone.forMonth||liveCycleKey()}:a);
+    banner="Removed from this month's bills. It's still on the Annual tab.";
+  }
   S[editing.tab]=S[editing.tab].filter(x=>x.id!==editing.item.id);
   addLog({name:editing.item.name,action:"deleted",delta:0});
   persist(); closeSheet(); render();
@@ -1856,6 +1969,7 @@ function renderSheet(){
     if(t==="annual"){
       body+=fld("Due date","f_date","date",F.date,`onchange="fSet('date',this.value)"`);
       body+=fld("Amount","f_amt","number",F.amt,`oninput="fSetNum('amt',this.value)"`);
+      body+=`<label class="fld" style="flex-direction:row;align-items:center;gap:8px;min-width:100%"><input type="checkbox" ${F.recur!==false?"checked":""} onchange="fSet('recur',this.checked)" style="width:auto"><span style="text-transform:none">Repeats every year (after its date passes, a paid bill comes back unpaid for next year)</span></label>`;
       body+=fld("Link to app/site (URL, optional)","f_url","text",F.url||"",`oninput="fSet('url',this.value)" placeholder="site or app link"`);
     }
     if(t==="invest"){
@@ -3051,6 +3165,7 @@ function savePayBill(){
     if(F.markPaid) nx.paid=true;
     return nx;
   });
+  if(F.markPaid) syncAnnualPaid(kind,id);
   // a bill that shares a link with a card/loan updates that record too — so a payoff
   // shows up on the Debt tab, Accounts, and the bill list at the same time
   if(newDebt!==null&&b.link) propagateLink(b.link,newDebt);
@@ -3219,7 +3334,128 @@ function openHistoryMenu(){
         <div style="font-weight:700;font-size:15px;margin-bottom:6px">History</div>
         <button onclick="openTxnHistory()">📋 &nbsp;Transactions &amp; account updates</button>
         <button onclick="openStubsPage()">🧾 &nbsp;Pay stubs</button>
+        <button onclick="openPastMonths()">📈 &nbsp;Past months &amp; trends</button>
         <button class="d" onclick="closeSheet()">Close</button>
+      </div>
+    </div>`;
+}
+// ---------- past months & trends ----------
+const CAT_LABEL={misc:"Misc",health:"Health",transport:"Transportation"};
+function prevMonthKey(){ const h=(S.history||[]).filter(x=>x.key<liveCycleKey()); return h.length?h[h.length-1].key:null; }
+// every closed month plus the month in progress, oldest first; income comes from the
+// paystubs you have now (so a stub entered after the close still counts)
+function monthRows(){
+  const live=liveCycleKey();
+  const rows=(S.history||[]).filter(h=>isObj(h)&&typeof h.key==="string"&&h.key<live).map(h=>({...h}));
+  rows.push({...monthSnapshot(S,live,"live"),live:true});
+  rows.forEach(r=>{ const inc=incomeFor(S,r.key); if(inc.c||!r.inc) r.inc=inc; });
+  return rows;
+}
+const rowSpent=r=>c2((r.cats||[]).reduce((s,c)=>s+(c.s||0),0));
+const rowBudget=r=>c2((r.cats||[]).reduce((s,c)=>s+(c.b||0),0));
+const rowBills=r=>c2((r.bills||[]).reduce((s,b)=>s+(b.a||0),0));
+const rowBillsPaid=r=>c2((r.bills||[]).filter(b=>b.p).reduce((s,b)=>s+(b.a||0),0));
+function vsLastHTML(key,m){
+  const pk=prevMonthKey(); if(!pk) return "";
+  const prev=(S.history||[]).find(h=>h.key===pk);
+  const pc=prev&&(prev.cats||[]).find(c=>c.k===key&&(c.id===m.id||c.n===m.name));
+  if(!pc) return "";
+  const d=c2((m.spent||0)-(pc.s||0));
+  const nm=monthNameOf(pk,{month:"short"});
+  if(Math.abs(d)<0.005) return `<div class="hint" style="margin-top:3px">Same as ${nm} (${fmt(pc.s)})</div>`;
+  return `<div class="hint" style="margin-top:3px">${d>0?"▲":"▼"} ${fmt(Math.abs(d))} ${d>0?"more":"less"} than ${nm} (${fmt(pc.s)})</div>`;
+}
+// small inline SVG charts, coloured from the theme
+function lineChartSVG(vals,labels,color){
+  const W=300,H=110,P=6,n=vals.length;
+  if(!n) return "";
+  const lo=Math.min(0,...vals), hi=Math.max(0,...vals), span=(hi-lo)||1;
+  const x=i=>n===1?W/2:P+i*(W-2*P)/(n-1), y=v=>H-18-(v-lo)/span*(H-30);
+  const pts=vals.map((v,i)=>x(i).toFixed(1)+","+y(v).toFixed(1)).join(" ");
+  const zero=lo<0?`<line x1="0" x2="${W}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" style="stroke:var(--line)" stroke-dasharray="3 3"/>`:"";
+  const lab=labels.map((l,i)=>(n<=6||i%Math.ceil(n/6)===0||i===n-1)?`<text x="${x(i).toFixed(1)}" y="${H-3}" text-anchor="middle" style="fill:var(--dim);font-size:9px">${esc(l)}</text>`:"").join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Net worth by month">${zero}<polyline points="${pts}" fill="none" style="stroke:${color}" stroke-width="2" stroke-linejoin="round"/>${vals.map((v,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.5" style="fill:${color}"/>`).join("")}${lab}</svg>`;
+}
+function pairBarsSVG(a,b,labels,ca,cb,aria){
+  const W=300,H=110,n=labels.length; if(!n) return "";
+  const hi=Math.max(1,...a,...b), gw=W/n, bw=Math.min(14,gw/2.6), y=v=>H-16-(v/hi)*(H-26);
+  let g="";
+  labels.forEach((l,i)=>{ const cx=gw*i+gw/2;
+    g+=`<rect x="${(cx-bw-1).toFixed(1)}" y="${y(a[i]).toFixed(1)}" width="${bw.toFixed(1)}" height="${(H-16-y(a[i])).toFixed(1)}" rx="2" style="fill:${ca}"/>`;
+    g+=`<rect x="${(cx+1).toFixed(1)}" y="${y(b[i]).toFixed(1)}" width="${bw.toFixed(1)}" height="${(H-16-y(b[i])).toFixed(1)}" rx="2" style="fill:${cb}"/>`;
+    if(n<=8||i%Math.ceil(n/8)===0||i===n-1) g+=`<text x="${cx.toFixed(1)}" y="${H-3}" text-anchor="middle" style="fill:var(--dim);font-size:9px">${esc(l)}</text>`; });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(aria)}">${g}</svg>`;
+}
+const legend=(items)=>`<div style="display:flex;gap:12px;font-size:11px;color:var(--dim);margin:2px 0 8px">${items.map(([c,t])=>`<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c};margin-right:4px"></span>${t}</span>`).join("")}</div>`;
+let pastSel=null;
+function openPastMonths(key){
+  const rows=monthRows();
+  pastSel=key&&rows.some(r=>r.key===key)?key:null;
+  if(pastSel){ renderPastMonth(rows); return; }
+  const recent=rows.slice(-12), lab=recent.map(r=>monthNameOf(r.key,{month:"short"}));
+  const only=rows.length===1;
+  const list=[...rows].reverse().map((r,i,arr)=>{
+    const prev=arr[i+1];
+    const sp=rowSpent(r), bud=rowBudget(r);
+    const dNw=prev?c2(r.nw-prev.nw):null;
+    return `<div class="row-item" onclick="openPastMonths('${r.key}')">
+      <div style="flex:1;min-width:0">
+        <div class="name">${monthNameOf(r.key)}${r.live?' <span class="chip">so far</span>':""}</div>
+        <div class="sub">Spent ${fmt(sp)}${bud>0?" of "+fmt(bud):""} · bills ${fmt(rowBillsPaid(r))} paid${r.inc&&r.inc.c?` · income ${fmt(r.inc.n)}`:""}</div>
+      </div>
+      <div style="text-align:right"><div class="amt ${r.nw>=0?"g":"r"}">${fmt(r.nw)}</div>${dNw!==null?`<div class="mono ${dNw>=0?"g":"r"}" style="font-size:10px">${dNw>=0?"+":""}${fmt(dNw)}</div>`:""}</div>
+    </div>`; }).join("");
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet centered" style="max-height:90vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-weight:700;font-size:16px">Past months</div>
+          <button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button>
+        </div>
+        ${only?`<div class="hint" style="margin-bottom:10px">Ledger keeps a record of each month when it closes (when you tap Start next month, or on the 1st). Your first one shows up after this month ends.</div>`:""}
+        <div class="sec">Net worth</div>
+        ${lineChartSVG(recent.map(r=>r.nw||0),lab,"var(--green)")}
+        <div class="sec">Spending vs budget</div>
+        ${legend([["var(--amber)","Spent"],["var(--line)","Budget"]])}
+        ${pairBarsSVG(recent.map(rowSpent),recent.map(rowBudget),lab,"var(--amber)","var(--line)","Spending vs budget by month")}
+        <div class="sec">Income vs bills</div>
+        ${legend([["var(--green)","Net pay (paystubs)"],["var(--red)","Bills"]])}
+        ${pairBarsSVG(recent.map(r=>(r.inc&&r.inc.n)||0),recent.map(rowBills),lab,"var(--green)","var(--red)","Income vs bills by month")}
+        <div class="sec" style="margin-top:12px">Months</div>
+        ${list}
+      </div>
+    </div>`;
+}
+function renderPastMonth(rows){
+  const i=rows.findIndex(r=>r.key===pastSel), r=rows[i], prev=i>0?rows[i-1]:null;
+  const pcat=c=>prev&&(prev.cats||[]).find(p=>p.k===c.k&&(p.id===c.id||p.n===c.n));
+  const cats=CARRY_CATS.map(k=>{
+    const list=(r.cats||[]).filter(c=>c.k===k); if(!list.length) return "";
+    return `<div class="sec">${CAT_LABEL[k]}</div>`+list.map(c=>{
+      const p=pcat(c), d=p?c2((c.s||0)-(p.s||0)):null;
+      return `<div class="logrow"><span style="flex:1;min-width:0">${esc(c.n)}${d!==null&&Math.abs(d)>=0.005?` <span class="${d>0?"r":"g"}" style="font-size:11px">${d>0?"▲":"▼"}${fmt(Math.abs(d))}</span>`:""}</span><span class="mono ${c.b>0&&c.s>c.b?"r":"d"}">${fmt(c.s)}${c.b>0?" / "+fmt(c.b):""}</span></div>`;
+    }).join("");
+  }).join("");
+  const bills=(r.bills||[]).map(b=>`<div class="logrow"><span style="flex:1;min-width:0;${b.p?"":"color:var(--red)"}">${b.p?"✓":"✗"} ${esc(b.n)}</span><span class="mono d">${fmt(b.a)}</span></div>`).join("");
+  const nav=(j,t)=>j>=0&&j<rows.length?`<button class="btn ghost" style="width:auto;padding:6px 14px" onclick="openPastMonths('${rows[j].key}')">${t}</button>`:`<button class="btn ghost" style="width:auto;padding:6px 14px;opacity:.35" disabled>${t}</button>`;
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="sheet centered" style="max-height:90vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          ${nav(i-1,"‹")}
+          <div style="text-align:center"><div style="font-weight:700;font-size:15px">${monthNameOf(r.key)}</div>
+            <div class="hint" style="font-size:10px">${r.live?"in progress":"closed "+new Date(r.at).toLocaleDateString("en-US",{month:"short",day:"numeric"})+(r.how==="early"?" (started next month early)":"")}</div></div>
+          ${nav(i+1,"›")}
+        </div>
+        ${krow("Spent",fmt(rowSpent(r))+(rowBudget(r)>0?" of "+fmt(rowBudget(r)):""),rowBudget(r)>0&&rowSpent(r)>rowBudget(r)?"r":"")}
+        ${krow("Bills paid",fmt(rowBillsPaid(r))+" of "+fmt(rowBills(r)))}
+        ${krow("Net pay from paystubs",r.inc&&r.inc.c?fmt(r.inc.n)+` (${r.inc.c} stub${r.inc.c>1?"s":""})`:"none entered","g")}
+        ${krow("Cash",fmt(r.cash))}${r.inv?krow("Investments",fmt(r.inv)):""}
+        ${krow("Debt",fmt(r.debt),"r")}
+        ${krow("Net worth",fmt(r.nw)+(prev?` (${r.nw-prev.nw>=0?"+":""}${fmt(c2(r.nw-prev.nw))})`:""),r.nw>=0?"g":"r",true)}
+        ${cats||'<div class="hint">No spending categories.</div>'}
+        ${bills?`<div class="sec">Bills</div>${bills}`:""}
+        <div style="display:flex;justify-content:space-between;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="openPastMonths()">← All months</button><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
       </div>
     </div>`;
 }
@@ -3434,10 +3670,9 @@ function archiveExpiredSchedules(){
   S.jobs.forEach(j=>{
     if(!j.payAnchor||!(j.schedule||[]).length) return;
     // the payday for the current period; if it's already passed, the period is over
-    const pd=nextPaydayFreq(j.payAnchor,j.freq); if(!pd) return;
-    const step=FREQ_DAYS[j.freq]||14;
-    // start of the current (upcoming) period = payday minus one period length
-    const periodStart=new Date(pd); periodStart.setDate(periodStart.getDate()-step);
+    const pd=nextPaydayFreq(j.payAnchor,j.freq,j.payDay2); if(!pd) return;
+    // start of the current (upcoming) period = the payday before it
+    const periodStart=paydayBefore(j.payAnchor,j.freq,j.payDay2,pd);
     // any schedule entries dated before this period's start belong to a finished period
     const oldEntries=j.schedule.filter(e=>e.date && new Date(e.date+"T12:00")<periodStart);
     if(oldEntries.length){
@@ -3562,6 +3797,7 @@ function openJobEdit(jid){
         </div>
         <div class="frm" style="margin-bottom:12px">
           ${fld("First / next payday","je_anchor","date",j.payAnchor||"",`onchange="jobField(${j.id},'payAnchor',this.value)"`)}
+          ${j.freq==="semimonthly"&&j.payAnchor?fld("Other payday each month (31 = last day)","je_day2","number",semiPayDays(new Date(j.payAnchor+"T12:00").getDate(),j.payDay2).find(x=>x!==(new Date(j.payAnchor+"T12:00").getDate()>=28?31:new Date(j.payAnchor+"T12:00").getDate()))||"",`inputmode="numeric" onchange="jobField(${j.id},'payDay2',this.value)"`):""}
         </div>
         <div class="hint" style="margin-bottom:10px">Set one payday and the app tracks the rest from your pay frequency.</div>
         <div class="sec">Rate(s)${ft?"":" & hours this period"}</div>
@@ -3605,11 +3841,11 @@ function hdrStatsHTML(c){
 function dueColor(b){
   if(b.paid) return "var(--green)";
   if(!b.due) return "var(--dim)";
-  // If viewing a future month, nothing is overdue — compare against that month's calendar.
-  const off=S.viewMonthOffset||0;
-  if(off>0) return "var(--dim)";
-  if(b.due<todayDay) return "var(--red)";
-  if(b.due-todayDay<=3) return "var(--amber)";
+  // If viewing a future month, nothing is overdue.
+  if((S.viewMonthOffset||0)>0) return "var(--dim)";
+  const left=billDaysLeft(b);
+  if(left<0) return "var(--red)";
+  if(left<=Math.max(0,Number(S.settings.dueDays)||0)) return "var(--amber)";
   return "var(--dim)";
 }
 
@@ -3673,14 +3909,14 @@ function jobsListHTML(c){
 
 function budgetTab(c){
   const dueList=c.dueBefore.map(b=>`<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--dim);padding:2px 0 2px 12px">
-    <span>${esc(b.name)} <span class="${b.due<todayDay?"r":"d"}">(the ${b.due})</span></span><span class="mono">${fmt(c.eff(b))}</span></div>`).join("");
+    <span>${esc(b.name)} <span class="${billDaysLeft(b)<0&&!b.paid?"r":"d"}">(the ${ord(billDateIn(b,cycleStart(b.paid?1:0)).getDate())})</span></span><span class="mono">${fmt(c.eff(b))}</span></div>`).join("");
   const catRow=(key,m)=>{
     const pct=m.budget?(m.spent/m.budget)*100:0;
     return `<div style="margin-bottom:12px;cursor:pointer" onclick="openEdit('${key}',${m.id})">
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span style="font-weight:600;font-size:13px">${esc(m.name)}${m.cat?` <span class="chip">${esc(titleCase(m.cat))}</span>`:""}${m.acct&&acctName(m.acct)?` <span class="chip b">${esc(acctName(m.acct))}</span>`:""}</span>
         <span class="mono ${pct>100?"r":"d"}" style="font-size:12px">${fmt(m.spent)} / ${fmt(m.budget)}</span>
-      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}${carryIn(m)>0?`<div class="hint" style="margin-top:3px">Includes ${fmt(carryIn(m))} carried from earlier overspending</div>`:""}</div>`;
+      </div>${bar(pct,pct>100?"var(--red)":pct>75?"var(--amber)":"var(--green)")}${vsLastHTML(key,m)}${carryIn(m)>0?`<div class="hint" style="margin-top:3px">Includes ${fmt(carryIn(m))} carried from earlier overspending</div>`:""}</div>`;
   };
   const misc=S.misc.map(m=>catRow('misc',m)).join("");
   const health=(S.health||[]).map(m=>catRow('health',m)).join("");
@@ -3759,13 +3995,14 @@ function monthlyTab(c){
   if(!S.monthly.length) return `<div class="empty">No monthly bills yet.<br>Tap + to add your first one.</div>`;
   const off=S.viewMonthOffset||0;
   const monthName=monthLabelFor(off);
-  const monthShort=(day)=>{ const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()+off); return d.toLocaleDateString("en-US",{month:"short"}); };
+  const viewBase=cycleStart(off);
+  const monthShort=()=>viewBase.toLocaleDateString("en-US",{month:"short"});
   const rows=[...S.monthly].sort((a,b)=>(a.due||99)-(b.due||99)).map(b=>`
     <div class="row-item" style="border-left:3px solid ${dueColor(b)}" onclick="openEdit('monthly',${b.id})">
       <button class="chk ${b.paid?"on":""}" onclick="event.stopPropagation();togglePaid('monthly',${b.id})">${b.paid?"✓":""}</button>
       <div style="flex:1;min-width:0">
         <div class="name" style="${b.paid?"text-decoration:line-through;opacity:.55":""}">${esc(b.name)}${b.link?'<span class="lnk">⟲</span>':""}${b.acct?`<span class="chip">${esc(b.acct)}</span>`:""}</div>
-        <div class="sub">${b.due?"Due "+monthShort()+" "+ord(b.due):"No due date"}${b.debt>0?` <span class="r">· owes ${fmt(b.debt)}</span>`:""}${(b.minAmt>0&&payAmt(b)-b.minAmt>0.005)?` <span class="d">· min ${fmt(b.minAmt)}</span>`:""}${(!(Number(b.amt||0)>0)&&!(b.schedAmt>0)&&b.minAmt>0)?' <span class="b">· recommended</span>':""}${b.fromAnnual?' <span class="chip">Annual</span>':""}</div>
+        <div class="sub">${b.due?"Due "+monthShort()+" "+ord(billDateIn(b,viewBase).getDate()):"No due date"}${b.debt>0?` <span class="r">· owes ${fmt(b.debt)}</span>`:""}${(b.minAmt>0&&payAmt(b)-b.minAmt>0.005)?` <span class="d">· min ${fmt(b.minAmt)}</span>`:""}${(!(Number(b.amt||0)>0)&&!(b.schedAmt>0)&&b.minAmt>0)?' <span class="b">· recommended</span>':""}${b.fromAnnual?' <span class="chip">Annual</span>':""}</div>
         ${b.schedAmt>0?`<div style="font-size:11px;color:var(--amber);margin-top:2px">⏱ Scheduled ${fmt(b.schedAmt)}${b.schedDate?" on "+fmtDate(b.schedDate):""}</div>`:""}
       </div>
       ${b.url?`<button class="btn ghost" style="padding:5px 9px;font-size:13px" onclick="openExt('${esc(b.url)}',event)">↗</button>`:""}
@@ -3777,10 +4014,10 @@ function monthlyTab(c){
   const allPaid=S.monthly.every(b=>b.paid);
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0 10px">
-      <button class="btn ghost" style="width:auto;padding:6px 14px;${off>0?"":"opacity:.35"}" ${off>0?'onclick="stepViewMonth(-1)"':"disabled"}>‹</button>
+      <button class="btn ghost" style="width:auto;padding:6px 14px;${off>0||(S.history||[]).length?"":"opacity:.35"}" ${off>0?'onclick="stepViewMonth(-1)"':(S.history||[]).length?'aria-label="Past months" onclick="openPastMonths(prevMonthKey())"':"disabled"}>‹</button>
       <div style="text-align:center">
         <div style="font-weight:700;font-size:15px">${monthName}</div>
-        ${off!==0?`<div class="hint" style="font-size:10px;cursor:pointer" onclick="jumpToCurrentMonth()">tap to return to ${monthLabelFor(0)}</div>`:'<div class="hint" style="font-size:10px">current month</div>'}
+        ${off!==0?`<div class="hint" style="font-size:10px;cursor:pointer" onclick="jumpToCurrentMonth()">tap to return to ${monthLabelFor(0)}</div>`:cycleAhead()?`<div class="hint" style="font-size:10px">started early · it's still ${monthNameOf(monthKeyNow(),{month:"long"})}</div>`:'<div class="hint" style="font-size:10px">current month</div>'}
       </div>
       <button class="btn ghost" style="width:auto;padding:6px 14px" onclick="stepViewMonth(1)">›</button>
     </div>
@@ -3818,13 +4055,13 @@ function annualTab(c){
       <button class="chk ${b.paid?"on":""}" onclick="event.stopPropagation();togglePaid('annual',${b.id})">${b.paid?"✓":""}</button>
       <div style="flex:1">
         <div class="name" style="${b.paid?"text-decoration:line-through;opacity:.55":""}">${esc(b.name)}</div>
-        <div class="sub">${new Date(b.date+"T12:00").toLocaleDateString("en-US",{month:"short",day:"numeric"})}</div>
+        <div class="sub">${new Date(b.date+"T12:00").toLocaleDateString("en-US",(b.date||"").slice(0,4)===String(new Date().getFullYear())?{month:"short",day:"numeric"}:{month:"short",day:"numeric",year:"numeric"})}${b.lastPaid?` <span class="d">· paid ${fmtDate(b.lastPaid)}</span>`:""}${b.recur===false?' <span class="chip">One time</span>':""}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">${b.url?`<button class="btn ghost" style="padding:5px 9px;font-size:13px" onclick="openExt('${esc(b.url)}',event)">↗</button>`:""}<div class="amt" style="${b.paid?"opacity:.5":""}">${fmt(b.amt)}</div></div>
     </div>`).join("");
   return `
     <div class="mono d" style="font-size:13px;margin:6px 0 12px">${fmt(c.aLeft)} left of ${fmt(c.aTotal)} this year</div>
-    ${bar(((c.aTotal-c.aLeft)/(c.aTotal||1))*100,"var(--green)")}
+    ${bar(Math.max(0,((c.aTotal-c.aLeft)/(c.aTotal||1))*100),"var(--green)")}
     <div style="height:14px"></div>${rows}`;
 }
 
