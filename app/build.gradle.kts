@@ -43,6 +43,14 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // the Claude SDK uses java.time, which older Androids (7 and 7.1) lack
+        isCoreLibraryDesugaringEnabled = true
+    }
+    packaging {
+        resources {
+            excludes += setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*",
+                "META-INF/*.kotlin_module", "META-INF/versions/9/OSGI-INF/MANIFEST.MF")
+        }
     }
 }
 
@@ -54,6 +62,9 @@ dependencies {
     implementation(libs.material)
     // on-phone text reading for paystub / receipt scans (works offline, nothing uploaded)
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    // Analyze > Ask Claude (uses your own Anthropic API key)
+    implementation("com.anthropic:anthropic-java:3.14.0")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)

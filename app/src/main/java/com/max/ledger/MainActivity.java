@@ -79,6 +79,8 @@ public class MainActivity extends Activity {
     private String cameraPath;        // temp photo for a camera scan
     private Uri pendingSnapMd;        // Markdown file picked, waiting for the JSON pick
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService aiExec = Executors.newSingleThreadExecutor(); // Claude calls, so a slow answer never holds up backups or scans
+    private volatile boolean aiBusy = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -255,6 +257,10 @@ public class MainActivity extends Activity {
     }
 
     // ---------- helpers ----------
+    private void aiReply(boolean ok, String text) {
+        js("window.ledgerAIResult&&window.ledgerAIResult(" + ok + "," + JSONObject.quote(text) + ")");
+    }
+
     private void js(final String code) {
         runOnUiThread(() -> { if (wv != null) wv.evaluateJavascript(code, null); });
     }
@@ -712,6 +718,52 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void scanDocument(final String source) {
             runOnUiThread(() -> startScan(source));
+        }
+
+        // ---------- Claude (Analyze) ----------
+        // The API key goes in once and is never handed back to the page: only whether one is set
+        // and its last 4 characters.
+
+        /** {"set":bool,"tail":"abcd","model":"..."} */
+        @JavascriptInterface
+        public String aiKeyStatus() {
+            try {
+                AiKeyStore ks = new AiKeyStore(MainActivity.this);
+                boolean set = ks.has();
+                return new JSONObject().put("set", set).put("tail", set ? ks.tail() : "")
+                        .put("model", ClaudeAdvisor.MODEL).toString();
+            } catch (Exception e) { return "{\"set\":false}"; }
+        }
+
+        /** Saves the key (encrypted, this phone only). Returns false if it doesn't look like an Anthropic key. */
+        @JavascriptInterface
+        public boolean aiSetKey(String key) {
+            return new AiKeyStore(MainActivity.this).set(key);
+        }
+
+        @JavascriptInterface
+        public void aiClearKey() {
+            new AiKeyStore(MainActivity.this).clear();
+        }
+
+        /** Sends the budget summary to Claude. Answers via window.ledgerAIResult(ok, text). */
+        @JavascriptInterface
+        public void askAI(final String budgetJson) {
+            if (aiBusy) return;
+            final String key = new AiKeyStore(MainActivity.this).get();
+            if (key == null) {
+                aiReply(false, "No Claude API key saved yet.");
+                return;
+            }
+            aiBusy = true;
+            aiExec.execute(() -> {
+                try {
+                    ClaudeAdvisor.Result r = ClaudeAdvisor.ask(key, budgetJson == null ? "{}" : budgetJson);
+                    aiReply(r.ok, r.text);
+                } finally {
+                    aiBusy = false;
+                }
+            });
         }
     }
 }

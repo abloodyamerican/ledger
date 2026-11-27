@@ -368,7 +368,7 @@ let undoStack=[], redoStack=[], lastSaved=null, newStep=true, lastChangeAt=0, qu
 const UNDO_MAX=40, STEP_GAP=4000;
 function stripTransient(obj){ const c={...obj}; delete c.__undo; return c; }
 // what counts as "your data" for undo: not the rebalance bar, alert bookkeeping or the month being viewed
-function undoKey(o){ const c={...o}; delete c.__undo; delete c.notified; delete c.viewMonthOffset; return JSON.stringify(c); }
+function undoKey(o){ const c={...o}; delete c.__undo; delete c.notified; delete c.viewMonthOffset; delete c.aiLast; return JSON.stringify(c); }
 function checkpoint(){ newStep=true; }
 function trackUndo(cur){
   if(quietSave||lastSaved===null||cur===lastSaved){ return; }
@@ -407,7 +407,7 @@ function canUndo(){ return undoStack.length>0; }
 function canRedo(){ return redoStack.length>0; }
 // swap in a saved state without recording it as a new change
 function applySnapshot(json){
-  const keep={notified:S.notified,viewMonthOffset:S.viewMonthOffset};
+  const keep={notified:S.notified,viewMonthOffset:S.viewMonthOffset,aiLast:S.aiLast};
   S=migrate({...JSON.parse(json),...keep});
   quietSave=true; try{ persist(); } finally{ quietSave=false; }
   newStep=true;
@@ -2939,42 +2939,166 @@ function analyzeBudget(){
   }
   // over-budget categories
   [["Misc",S.misc],["Health",S.health||[]],["Transportation",S.transport||[]]].forEach(([label,arr])=>{
-    arr.forEach(m=>{ if(m.budget>0&&m.spent>m.budget) recs.push(`• ${label}: "${m.name}" is over by ${fmt(m.spent-m.budget)}.`); });
+    arr.forEach(m=>{ if(m.budget>0&&m.spent>m.budget) recs.push(`• ${label}: "${esc(m.name)}" is over by ${fmt(m.spent-m.budget)}.`); });
   });
   // bills paying above minimum (schedAmt) — highlight potential slack
   const overpay=S.monthly.filter(b=>b.schedAmt>0&&b.schedAmt>b.amt);
   if(overpay.length){
     const extra=overpay.reduce((s,b)=>s+(b.schedAmt-b.amt),0);
-    recs.push(`• You're budgeting ${fmt(extra)}/mo above the minimums on ${overpay.length} bill${overpay.length>1?"s":""} (${overpay.map(b=>b.name).join(", ")}). Good for cutting interest — but if a lean month hits, dropping to minimums frees up that cash.`);
+    recs.push(`• You're budgeting ${fmt(extra)}/mo above the minimums on ${overpay.length} bill${overpay.length>1?"s":""} (${overpay.map(b=>esc(b.name)).join(", ")}). Good for cutting interest — but if a lean month hits, dropping to minimums frees up that cash.`);
   }
   // high-APR debt
   const hi=[...S.credit.filter(x=>x.debt>0&&x.apr>=20)].sort((a,b)=>b.apr-a.apr);
-  if(hi.length) recs.push(`• Highest-APR debt: ${hi[0].name} at ${hi[0].apr}%. Extra dollars there save the most interest.`);
+  if(hi.length) recs.push(`• Highest-APR debt: ${esc(hi[0].name)} at ${hi[0].apr}%. Extra dollars there save the most interest.`);
   // savings check
   if(c.savingsTotal<monthBudget) recs.push(`• Emergency cushion (${fmt(c.savingsTotal)}) is under one month of expenses (${fmt(monthBudget)}). Building it up protects the rest of this plan.`);
   const body=recs.length?recs.join("<br><br>"):"Everything looks balanced — no red flags in your current budget.";
-  const hasAI = typeof window!=="undefined" && window.Android && window.Android.askAI;
+  const ai=aiInfo();
+  const last=S.aiLast&&S.aiLast.text?S.aiLast:null;
+  const aiPart=!ai?`<div class="hint" style="margin-top:12px">Asking Claude for deeper advice works in the installed app.</div>`
+    :`<button class="btn" style="margin-top:14px" onclick="askAIBudget()">🤖 Ask Claude for deeper advice</button>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:12px">
+        ${last?`<a href="#" onclick="event.preventDefault();aiShowAnswer(S.aiLast.text,S.aiLast.at)">View last answer (${esc(aiWhen(last.at))})</a>`:""}
+        <a href="#" onclick="event.preventDefault();aiKeySheet()">${ai.set?`Claude key …${esc(ai.tail)}`:"Set up Claude"}</a>
+      </div>`;
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
       <div class="menu" style="padding:16px;max-height:82vh;overflow-y:auto">
         <div style="font-weight:700;font-size:15px;margin-bottom:10px">Budget analysis</div>
         <div style="font-size:13px;line-height:1.55">${body}</div>
-        ${hasAI?`<button class="btn" style="margin-top:14px" onclick="askAIBudget()">🤖 Ask AI for deeper advice</button>`:`<div class="hint" style="margin-top:12px">Deeper AI recommendations are available in the installed app version.</div>`}
+        ${aiPart}
         <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>
       </div>
     </div>`;
 }
-function askAIBudget(){
-  const c=calc();
-  const snapshot={
-    monthlyBills:c.mTotal, variableBudget:c.miscBudget, incomeMin:c.monthNetMin, incomeMax:c.monthNetMax,
-    savings:c.savingsTotal, totalDebt:c.totalDebt,
-    cards:S.credit.map(x=>({name:x.name,debt:x.debt,apr:x.apr,limit:x.limit})),
-    bills:S.monthly.map(b=>({name:b.name,min:b.minAmt||0,budgeted:payAmt(b),recommended:recommendPay(b),debt:b.debt||0,apr:b.apr||0})),
-    misc:S.misc.map(m=>({name:m.name,budget:m.budget,spent:m.spent})),
-  };
-  try{ window.Android.askAI(JSON.stringify(snapshot)); }catch(e){ alert("AI not available."); }
+// ---------- Ask Claude (Analyze) ----------
+// The API key lives in the Android app (encrypted, this phone only). The page can save or
+// remove it but never read it back: aiKeyStatus() only says whether one is set and its last 4.
+let aiWaiting=false, aiTimer=null;
+function aiInfo(){
+  try{
+    if(typeof window==="undefined"||!window.Android||!window.Android.aiKeyStatus||!window.Android.askAI) return null;
+    return JSON.parse(window.Android.aiKeyStatus())||{set:false};
+  }catch(e){ return null; }
 }
+function aiWhen(at){
+  const d=new Date(at); if(isNaN(d)) return "";
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric"});
+}
+function aiSheet(inner){
+  document.getElementById("sheetHost").innerHTML=`
+    <div class="overlay center" onclick="if(event.target===this)closeSheet()">
+      <div class="menu" style="padding:16px;max-height:82vh;overflow-y:auto">${inner}</div>
+    </div>`;
+}
+function aiKeySheet(err){
+  const ai=aiInfo(); if(!ai) return;
+  aiSheet(`
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Claude API key</div>
+    <div style="font-size:13px;line-height:1.5">Ledger asks Claude with your own Anthropic API key, so each answer is billed to your Anthropic account (usually a few cents). Make a key at console.anthropic.com under API keys.</div>
+    <div class="hint" style="margin-top:8px">The key is encrypted and stays on this phone. It isn't in Ledger's backups or snapshots, and Ledger never shows it again.</div>
+    ${ai.set?`<div style="font-size:13px;margin-top:10px">Saved key ends in <b>…${esc(ai.tail)}</b>.</div>`:""}
+    <label class="fld" style="margin-top:10px"><span>${ai.set?"Replace with a new key":"API key"}</span>
+      <input id="aiKeyIn" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-ant-…"></label>
+    ${err?`<div style="color:var(--red);font-size:12px;margin-top:6px">${esc(err)}</div>`:""}
+    <div style="display:flex;gap:8px;margin-top:14px">
+      ${ai.set?`<button class="btn ghost" style="flex:1" onclick="aiRemoveKey()">Remove key</button>`:""}
+      <button class="btn ghost" style="flex:1" onclick="analyzeBudget()">Back</button>
+      <button class="btn" style="flex:1" onclick="aiSaveKey()">Save</button>
+    </div>`);
+}
+function aiSaveKey(){
+  const el=document.getElementById("aiKeyIn"); const v=(el&&el.value||"").trim();
+  if(!v){ aiKeySheet("Paste your key first."); return; }
+  let ok=false; try{ ok=window.Android.aiSetKey(v); }catch(e){}
+  if(el) el.value="";
+  if(!ok){ aiKeySheet("That doesn't look like an Anthropic API key. It starts with sk-ant-."); return; }
+  aiConfirmSheet();
+}
+function aiRemoveKey(){
+  try{ window.Android.aiClearKey(); }catch(e){}
+  banner="Claude key removed from this phone"; closeSheet(); render();
+}
+function aiSnapshot(){
+  const c=calc();
+  const cat=a=>(a||[]).map(m=>({name:m.name,budget:m.budget||0,spent:m.spent||0}));
+  return {
+    monthlyBills:c.mTotal, variableBudget:c.miscBudget, incomeLeanMonth:c.monthNetMin, incomeFullMonth:c.monthNetMax,
+    savings:c.savingsTotal, totalDebt:c.totalDebt,
+    cards:S.credit.map(x=>({name:x.name,balance:x.debt||0,apr:x.apr||0,limit:x.limit||0})),
+    bills:S.monthly.map(b=>({name:b.name,minimum:b.minAmt||b.amt||0,budgeted:payAmt(b),recommended:recommendPay(b),balance:b.debt||0,apr:b.apr||0})),
+    categories:{misc:cat(S.misc),health:cat(S.health),transportation:cat(S.transport)},
+  };
+}
+// what leaves the phone, in words, for the confirm step
+function aiSendList(){
+  const n=S.credit.length, b=S.monthly.length;
+  return [
+    "Take-home range for a lean and a full month",
+    `Bill names, minimums and what you budget (${b} bill${b===1?"":"s"})`,
+    `Card names, balances, APRs and limits (${n} card${n===1?"":"s"})`,
+    "Spending category names, budgets and what you've spent",
+    "Savings total and total debt",
+  ];
+}
+function askAIBudget(){
+  const ai=aiInfo();
+  if(!ai){ alert("Asking Claude works in the installed app."); return; }
+  if(!ai.set){ aiKeySheet(); return; }
+  aiConfirmSheet();
+}
+function aiConfirmSheet(){
+  aiSheet(`
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Send your budget to Claude?</div>
+    <div style="font-size:13px;line-height:1.5">Claude gets:</div>
+    <ul style="font-size:13px;line-height:1.5;margin:6px 0 0 18px;padding:0">${aiSendList().map(x=>`<li>${x}</li>`).join("")}</ul>
+    <div class="hint" style="margin-top:8px">No account numbers, paystubs or notes. Billed to your Anthropic account, usually a few cents.</div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="btn ghost" style="flex:1" onclick="analyzeBudget()">Cancel</button>
+      <button class="btn" style="flex:1" onclick="aiSend()">Send</button>
+    </div>`);
+}
+function aiSend(){
+  if(aiWaiting) return aiWaitingSheet();
+  aiWaiting=true;
+  aiWaitingSheet();
+  clearTimeout(aiTimer);
+  aiTimer=setTimeout(()=>{ if(aiWaiting) window.ledgerAIResult(false,"Claude took too long to answer. Try again."); },180000);
+  try{ window.Android.askAI(JSON.stringify(aiSnapshot())); }
+  catch(e){ window.ledgerAIResult(false,"Couldn't start the request."); }
+}
+function aiWaitingSheet(){
+  aiSheet(`
+    <div style="font-weight:700;font-size:15px;margin-bottom:8px">Asking Claude…</div>
+    <div style="font-size:13px;line-height:1.5">This usually takes under a minute. You can close this; the answer will be under Analyze.</div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" style="width:auto" onclick="closeSheet()">Close</button></div>`);
+}
+// Claude's text, escaped, with **bold** and "- " lines kept
+function aiFormat(text){
+  return String(text||"").split(/\n/).map(line=>{
+    let h=esc(line.trim()).replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>");
+    if(!h) return "";
+    if(/^[-•*]\s+/.test(line.trim())) return `<div style="display:flex;gap:6px;margin:0 0 8px"><span>•</span><span>${h.replace(/^(-|•|\*)\s+/,"")}</span></div>`;
+    return `<div style="margin:0 0 8px">${h}</div>`;
+  }).join("");
+}
+function aiShowAnswer(text,at,ok){
+  aiSheet(`
+    <div style="font-weight:700;font-size:15px;margin-bottom:10px">${ok===false?"Claude couldn't answer":"Claude's advice"}</div>
+    <div style="font-size:13px;line-height:1.55">${aiFormat(text)}</div>
+    ${ok===false?"":`<div class="hint" style="margin-top:6px">${at?esc(aiWhen(at))+" · ":""}Advice, not a guarantee. Check the numbers before acting.</div>`}
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="btn ghost" style="flex:1" onclick="analyzeBudget()">Back</button>
+      ${ok===false?`<button class="btn" style="flex:1" onclick="askAIBudget()">Try again</button>`:`<button class="btn" style="flex:1" onclick="closeSheet()">Done</button>`}
+    </div>`);
+}
+window.ledgerAIResult=function(ok,text){
+  const shown=aiWaiting && !!document.querySelector("#sheetHost .overlay");
+  aiWaiting=false; clearTimeout(aiTimer);
+  if(ok){ S.aiLast={at:new Date().toISOString(),text:String(text||"")}; persist(); }
+  if(shown) aiShowAnswer(text, ok?S.aiLast.at:null, ok);
+  else { banner=ok?"Claude's answer is ready under Analyze":"Claude couldn't answer: "+String(text||""); render(); }
+};
 function subMenu(title,opts){
   document.getElementById("sheetHost").innerHTML=`
     <div class="overlay center" onclick="if(event.target===this)closeSheet()">
